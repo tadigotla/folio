@@ -11,11 +11,12 @@ The system SHALL expose `/api/youtube/oauth/authorize` that initiates a Google O
 - **THEN** the system SHALL respond with HTTP 500 and an inline error page linking to the RUNBOOK section on OAuth setup
 
 ### Requirement: OAuth callback and token persistence
-The system SHALL expose `/api/youtube/oauth/callback` that accepts `code` and `state` query parameters. It SHALL verify the state against the cookie, exchange the code for access + refresh tokens at `https://oauth2.googleapis.com/token`, and upsert a row in `oauth_tokens` with `provider = 'youtube'`, the returned `access_token`, `refresh_token`, computed `expires_at` (ISO 8601 UTC), granted `scope`, and `updated_at = NOW()`.
+The system SHALL expose `/api/youtube/oauth/callback` that accepts `code` and `state` query parameters. It SHALL verify the state against the cookie, exchange the code for access + refresh tokens at `https://oauth2.googleapis.com/token`, and upsert a row in `oauth_tokens` with `provider = 'youtube'`, the returned `access_token`, `refresh_token`, computed `expires_at` (ISO 8601 UTC), granted `scope`, and `updated_at = NOW()`. The callback SHALL NOT trigger any implicit data import — imports are explicit user actions on `/settings/youtube`.
 
 #### Scenario: Successful callback
 - **WHEN** Google redirects back with a valid `code` and matching `state`
-- **THEN** the system SHALL exchange the code, store the token row, clear the state cookie, trigger an initial subscription sync, and redirect the browser to `/settings/youtube?connected=1`
+- **THEN** the system SHALL exchange the code, store the token row, clear the state cookie, and redirect the browser to `/settings/youtube?connected=1`
+- **AND** NO import or sync SHALL run as a side-effect of the callback
 
 #### Scenario: State mismatch
 - **WHEN** the `state` query parameter does not match the `youtube_oauth_state` cookie (or the cookie is missing)
@@ -34,15 +35,20 @@ The YouTube API client SHALL check `oauth_tokens.expires_at` before every outbou
 
 #### Scenario: Refresh token revoked
 - **WHEN** the refresh call to Google returns `invalid_grant`
-- **THEN** the client SHALL throw a typed `OAuthRefreshError` that callers can catch and surface to the settings page; the existing `oauth_tokens` row SHALL NOT be deleted automatically
+- **THEN** the client SHALL throw a typed `TokenRevokedError` that callers can catch and surface to the settings page; the existing `oauth_tokens` row SHALL NOT be deleted automatically
+
+#### Scenario: 401 on API call triggers a single retry with refresh
+- **WHEN** an API call returns HTTP 401 despite a seemingly-fresh access token
+- **THEN** the client SHALL force a refresh and retry the call exactly once; if the retry also returns 401, the client SHALL throw `TokenRevokedError`
 
 ### Requirement: Disconnect clears tokens
-The system SHALL expose a POST endpoint that deletes the `oauth_tokens` row for `provider = 'youtube'` and optionally disables all user-imported sources.
+The system SHALL expose `POST /api/youtube/oauth/disconnect` that deletes the `oauth_tokens` row for `provider = 'youtube'`. The imported corpus (videos, channels, consumption, provenance, import log) SHALL NOT be touched — disconnect is a credential operation, not a data operation. There is no `disable_sources` option because sources no longer exist.
 
-#### Scenario: Disconnect without touching sources
-- **WHEN** the user submits the Disconnect form with `disable_sources = false`
-- **THEN** the `oauth_tokens` row SHALL be deleted and user-imported `sources` rows SHALL remain enabled (RSS continues)
+#### Scenario: Disconnect deletes the token only
+- **WHEN** the user clicks Disconnect on `/settings/youtube`
+- **THEN** the `oauth_tokens` row for `provider = 'youtube'` SHALL be deleted
+- **AND** no rows in `videos`, `channels`, `consumption`, `video_provenance`, or `import_log` SHALL be modified
 
-#### Scenario: Disconnect and disable sources
-- **WHEN** the user submits Disconnect with `disable_sources = true`
-- **THEN** the `oauth_tokens` row SHALL be deleted AND all rows matching `sources.id LIKE 'youtube_channel_%_user'` SHALL be updated to `enabled = 0`
+#### Scenario: Disconnect when not connected
+- **WHEN** the disconnect endpoint is called and no `oauth_tokens` row exists
+- **THEN** the endpoint SHALL respond with HTTP 204 and perform no writes

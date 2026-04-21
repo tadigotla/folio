@@ -18,55 +18,28 @@ down:
         kill $pids
     fi
 
-# Is it already running? Ports, processes, cron, DB.
+# Is it already running? Ports, DB.
 status:
     #!/usr/bin/env bash
     echo "=== Port 6060 (next dev) ==="
     lsof -i :6060 || echo "(nothing listening)"
     echo
-    echo "=== Fetcher cron ==="
-    if crontab -l 2>/dev/null | grep -q "folio:fetch"; then
-        crontab -l | grep "folio:fetch"
-    else
-        echo "(not installed — run \`just cron-install\`)"
-    fi
-    echo
     echo "=== SQLite DB ==="
     if [ -f events.db ]; then
         ls -lh events.db events.db-wal events.db-shm 2>/dev/null | awk '{print $NF, $5}'
     else
-        echo "(events.db missing — run \`just seed\`)"
+        echo "(events.db missing — start \`just dev\` to apply migrations)"
     fi
 
-# Tail logs (dev runs foreground; only the fetcher cron writes a log file)
+# Tail logs. next dev runs in the foreground; there's no log file for it.
 logs:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [ -f .logs/fetch.log ]; then
-        tail -f .logs/fetch.log
-    else
-        echo ".logs/fetch.log not present yet."
-        echo "next dev runs in the foreground — its logs go to whatever terminal ran \`just dev\`."
-        echo "The fetcher cron writes to .logs/fetch.log once \`just cron-install\` has been run and has fired at least once."
-        exit 1
-    fi
+    @echo "next dev runs in the foreground — its logs go to whatever terminal ran \`just dev\`."
+    @echo "There is no background job in this project."
 
 # No test runner configured. Run the linter instead.
 test:
     @echo "No test runner in this project (see CLAUDE.md). Running lint:"
     npm run lint
-
-# One-shot run of the ingestion orchestrator (what cron invokes)
-fetch:
-    npm run fetch
-
-# Apply migrations and upsert seed rows in `sources`
-seed:
-    npx tsx db/seed-sources.ts
-
-# Force a YouTube subscription re-sync (normally runs on each fetcher tick)
-youtube-sync:
-    npx tsx scripts/sync-subscriptions.ts
 
 # Timestamped copy of events.db (run before risky migrations)
 backup-db:
@@ -82,35 +55,30 @@ backup-db:
     cp events.db "$dest"
     echo "Wrote $dest ($(ls -lh "$dest" | awk '{print $5}'))"
 
-# Install the every-30-min fetcher cron entry for this checkout
-cron-install:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    repo="$(pwd)"
-    mkdir -p "$repo/.logs"
-    marker="# folio:fetch ($repo)"
-    line="*/30 * * * * /bin/zsh -lc 'cd \"$repo\" && npm run fetch' >> \"$repo/.logs/fetch.log\" 2>&1 $marker"
-    existing="$(crontab -l 2>/dev/null || true)"
-    if echo "$existing" | grep -Fq "$marker"; then
-        echo "Already installed:"
-        echo "$existing" | grep -F "$marker"
-        exit 0
-    fi
-    { echo "$existing"; echo "$line"; } | sed '/^$/d' | crontab -
-    echo "Installed:"
-    echo "  $line"
-    echo "Logs: $repo/.logs/fetch.log"
+# Print the OAuth authorize URL. Open it in a browser while `just dev` is running.
+youtube-auth:
+    @echo "Start \`just dev\`, then open:"
+    @echo "  http://localhost:6060/api/youtube/oauth/authorize"
 
-# Remove the fetcher cron entry for this checkout
-cron-uninstall:
+# Trigger a YouTube import via the running dev server.
+# KIND is one of: likes | subscriptions | playlist
+# For KIND=playlist, also pass ID=<playlist_id>
+youtube-import KIND="" ID="":
     #!/usr/bin/env bash
     set -euo pipefail
-    repo="$(pwd)"
-    marker="# folio:fetch ($repo)"
-    existing="$(crontab -l 2>/dev/null || true)"
-    if ! echo "$existing" | grep -Fq "$marker"; then
-        echo "No entry for this checkout."
-        exit 0
-    fi
-    echo "$existing" | grep -Fv "$marker" | crontab -
-    echo "Removed cron entry for $repo"
+    case "{{KIND}}" in
+      likes)
+        curl -sS -X POST http://localhost:6060/api/youtube/import/likes ;;
+      subscriptions)
+        curl -sS -X POST http://localhost:6060/api/youtube/import/subscriptions ;;
+      playlist)
+        if [ -z "{{ID}}" ]; then
+          echo "Usage: just youtube-import KIND=playlist ID=<playlist_id>" >&2
+          exit 1
+        fi
+        curl -sS -X POST "http://localhost:6060/api/youtube/import/playlists/{{ID}}" ;;
+      *)
+        echo "Usage: just youtube-import KIND=<likes|subscriptions|playlist> [ID=<playlist_id>]" >&2
+        exit 1 ;;
+    esac
+    echo

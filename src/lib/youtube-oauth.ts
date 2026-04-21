@@ -1,9 +1,13 @@
+import { createHmac, randomBytes, timingSafeEqual } from 'crypto';
 import { getDb } from './db';
+import { nowUTC } from './time';
 
 export const REDIRECT_URI = 'http://localhost:6060/api/youtube/oauth/callback';
+export const EXPECTED_PORT = '6060';
 export const SCOPE = 'https://www.googleapis.com/auth/youtube.readonly';
 const AUTH_ENDPOINT = 'https://accounts.google.com/o/oauth2/v2/auth';
 const TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
+const REFRESH_WINDOW_MS = 60 * 1000;
 
 export interface TokenResponse {
   access_token: string;
@@ -21,12 +25,10 @@ export interface StoredToken {
   updated_at: string;
 }
 
-export class OAuthRefreshError extends Error {
-  readonly code: 'invalid_grant' | 'network' | 'other';
-  constructor(code: 'invalid_grant' | 'network' | 'other', message: string) {
+export class TokenRevokedError extends Error {
+  constructor(message: string) {
     super(message);
-    this.name = 'OAuthRefreshError';
-    this.code = code;
+    this.name = 'TokenRevokedError';
   }
 }
 
@@ -51,7 +53,7 @@ export function buildAuthorizeUrl(state: string): string {
   return `${AUTH_ENDPOINT}?${params.toString()}`;
 }
 
-export async function exchangeCodeForTokens(code: string): Promise<TokenResponse> {
+export async function exchangeCode(code: string): Promise<TokenResponse> {
   const clientId = requireEnv('YOUTUBE_OAUTH_CLIENT_ID');
   const clientSecret = requireEnv('YOUTUBE_OAUTH_CLIENT_SECRET');
 
@@ -75,15 +77,9 @@ export async function exchangeCodeForTokens(code: string): Promise<TokenResponse
   return (await res.json()) as TokenResponse;
 }
 
-export async function refreshAccessToken(refreshToken: string): Promise<TokenResponse> {
-  let clientId: string;
-  let clientSecret: string;
-  try {
-    clientId = requireEnv('YOUTUBE_OAUTH_CLIENT_ID');
-    clientSecret = requireEnv('YOUTUBE_OAUTH_CLIENT_SECRET');
-  } catch (err) {
-    throw new OAuthRefreshError('other', err instanceof Error ? err.message : String(err));
-  }
+async function refreshAccessToken(refreshToken: string): Promise<TokenResponse> {
+  const clientId = requireEnv('YOUTUBE_OAUTH_CLIENT_ID');
+  const clientSecret = requireEnv('YOUTUBE_OAUTH_CLIENT_SECRET');
 
   const body = new URLSearchParams({
     refresh_token: refreshToken,
@@ -92,16 +88,11 @@ export async function refreshAccessToken(refreshToken: string): Promise<TokenRes
     grant_type: 'refresh_token',
   });
 
-  let res: Response;
-  try {
-    res = await fetch(TOKEN_ENDPOINT, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body,
-    });
-  } catch (err) {
-    throw new OAuthRefreshError('network', err instanceof Error ? err.message : String(err));
-  }
+  const res = await fetch(TOKEN_ENDPOINT, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body,
+  });
 
   if (!res.ok) {
     const text = await res.text();
@@ -110,9 +101,9 @@ export async function refreshAccessToken(refreshToken: string): Promise<TokenRes
       payload = JSON.parse(text);
     } catch {}
     if (payload.error === 'invalid_grant') {
-      throw new OAuthRefreshError('invalid_grant', `Refresh rejected: ${text}`);
+      throw new TokenRevokedError(`Refresh rejected: ${text}`);
     }
-    throw new OAuthRefreshError('other', `Refresh failed: ${res.status} ${text}`);
+    throw new Error(`Refresh failed: ${res.status} ${text}`);
   }
 
   return (await res.json()) as TokenResponse;
@@ -164,7 +155,90 @@ export function upsertToken(tokens: TokenResponse): StoredToken {
   };
 }
 
-export function deleteStoredToken(): void {
+export function disconnect(): void {
   const db = getDb();
   db.prepare(`DELETE FROM oauth_tokens WHERE provider = 'youtube'`).run();
+}
+
+export async function getAccessToken(): Promise<string> {
+  const stored = getStoredToken();
+  if (!stored) throw new TokenRevokedError('Not connected to YouTube');
+
+  const expiresAt = new Date(stored.expires_at).getTime();
+  if (expiresAt - Date.now() > REFRESH_WINDOW_MS) {
+    return stored.access_token;
+  }
+
+  if (!stored.refresh_token) {
+    throw new TokenRevokedError('Access token expired and no refresh token on file');
+  }
+
+  const refreshed = await refreshAccessToken(stored.refresh_token);
+  const next = upsertToken(refreshed);
+  return next.access_token;
+}
+
+export async function forceRefresh(): Promise<string> {
+  const stored = getStoredToken();
+  if (!stored || !stored.refresh_token) {
+    throw new TokenRevokedError('No refresh token on file');
+  }
+  const refreshed = await refreshAccessToken(stored.refresh_token);
+  const next = upsertToken(refreshed);
+  return next.access_token;
+}
+
+function getOrCreateStateSecret(): string {
+  const db = getDb();
+  const row = db
+    .prepare(`SELECT value FROM app_secrets WHERE key = 'oauth_state'`)
+    .get() as { value: string } | undefined;
+  if (row) return row.value;
+
+  const secret = randomBytes(32).toString('hex');
+  db.prepare(
+    `INSERT INTO app_secrets (key, value, created_at) VALUES ('oauth_state', ?, ?)
+     ON CONFLICT(key) DO NOTHING`,
+  ).run(secret, nowUTC());
+  const final = db
+    .prepare(`SELECT value FROM app_secrets WHERE key = 'oauth_state'`)
+    .get() as { value: string };
+  return final.value;
+}
+
+export function signState(state: string, expiryUnix: number): string {
+  const secret = getOrCreateStateSecret();
+  const mac = createHmac('sha256', secret)
+    .update(`${state}.${expiryUnix}`)
+    .digest('hex');
+  return `${state}.${expiryUnix}.${mac}`;
+}
+
+export function verifyState(cookieValue: string | undefined, providedState: string): boolean {
+  if (!cookieValue) return false;
+  const parts = cookieValue.split('.');
+  if (parts.length !== 3) return false;
+  const [state, expiryStr, mac] = parts;
+  if (state !== providedState) return false;
+  const expiryUnix = Number(expiryStr);
+  if (!Number.isFinite(expiryUnix)) return false;
+  if (Date.now() / 1000 > expiryUnix) return false;
+
+  const expected = createHmac('sha256', getOrCreateStateSecret())
+    .update(`${state}.${expiryUnix}`)
+    .digest('hex');
+  const a = Buffer.from(mac, 'hex');
+  const b = Buffer.from(expected, 'hex');
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+export function assertExpectedPort(): void {
+  const port = process.env.PORT ?? EXPECTED_PORT;
+  if (port !== EXPECTED_PORT) {
+    throw new Error(
+      `OAuth redirect URI is hardcoded to port ${EXPECTED_PORT} but the app is running on port ${port}. ` +
+        `See RUNBOOK.md § YouTube OAuth for how to update Google Cloud Console if you change ports.`,
+    );
+  }
 }

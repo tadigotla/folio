@@ -1,15 +1,14 @@
 import Link from 'next/link';
 import { Kicker } from '../ui/Kicker';
 import { formatDuration } from '../../lib/time';
-import type { IssueVideo } from '../../lib/issue';
+import type { VideoWithSection } from '../../lib/consumption';
 
 interface Props {
   sectionName: string | null;
-  nextInSection: IssueVideo[];
-  alsoInIssue: IssueVideo[];
+  nextInSection: VideoWithSection[];
 }
 
-function Row({ v }: { v: IssueVideo }) {
+function Row({ v }: { v: VideoWithSection }) {
   const duration = formatDuration(v.duration_seconds);
   return (
     <li className="border-b" style={{ borderColor: 'var(--color-rule)' }}>
@@ -36,38 +35,20 @@ function Row({ v }: { v: IssueVideo }) {
   );
 }
 
-export function NextPieceFooter({
-  sectionName,
-  nextInSection,
-  alsoInIssue,
-}: Props) {
+export function NextPieceFooter({ sectionName, nextInSection }: Props) {
   const sectionLabel = sectionName ? sectionName.toUpperCase() : 'UNSORTED';
   return (
-    <footer className="grid grid-cols-1 gap-10 md:grid-cols-2">
-      <div>
-        <Kicker withRule>Next in {sectionLabel}</Kicker>
-        {nextInSection.length === 0 ? (
-          <p className="mt-4 italic text-sage">Nothing else queued here.</p>
-        ) : (
-          <ul className="mt-4">
-            {nextInSection.map((v) => (
-              <Row key={v.id} v={v} />
-            ))}
-          </ul>
-        )}
-      </div>
-      <div>
-        <Kicker withRule>Also in this issue</Kicker>
-        {alsoInIssue.length === 0 ? (
-          <p className="mt-4 italic text-sage">You&apos;ve seen the rest.</p>
-        ) : (
-          <ul className="mt-4">
-            {alsoInIssue.map((v) => (
-              <Row key={v.id} v={v} />
-            ))}
-          </ul>
-        )}
-      </div>
+    <footer>
+      <Kicker withRule>Next in {sectionLabel}</Kicker>
+      {nextInSection.length === 0 ? (
+        <p className="mt-4 italic text-sage">Nothing else queued here.</p>
+      ) : (
+        <ul className="mt-4">
+          {nextInSection.map((v) => (
+            <Row key={v.id} v={v} />
+          ))}
+        </ul>
+      )}
     </footer>
   );
 }

@@ -5,6 +5,7 @@ const LINKS: Array<{ href: string; label: string }> = [
   { href: '/library', label: 'Library' },
   { href: '/library#archived', label: 'Archive' },
   { href: '/sections', label: 'Sections' },
+  { href: '/issues', label: 'Issues' },
   { href: '/settings/youtube', label: 'YouTube' },
 ];
 
@@ -31,13 +32,6 @@ export function TopNav() {
             )}
           </span>
         ))}
-        <span className="h-2.5 w-px bg-sage/60" aria-hidden="true" />
-        <Link
-          href="/inbox"
-          className="font-sans text-[10px] font-medium uppercase tracking-[0.16em] text-ink-soft/70 hover:text-ink"
-        >
-          raw inbox
-        </Link>
         <span className="h-2.5 w-px bg-sage/60" aria-hidden="true" />
         <KeyboardHelp />
       </div>

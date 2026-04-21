@@ -18,16 +18,11 @@ const GROUPS: Group[] = [
     bindings: [{ keys: ['?'], help: 'Toggle this help' }],
   },
   {
-    scope: 'Inbox  (/inbox)',
+    scope: 'Workspace  (/)',
     bindings: [
-      { keys: ['j'], help: 'Next video' },
-      { keys: ['k'], help: 'Previous video' },
-      { keys: ['g', 'g'], help: 'Jump to top' },
-      { keys: ['G'], help: 'Jump to bottom' },
-      { keys: ['s'], help: 'Save focused video' },
-      { keys: ['d'], help: 'Dismiss focused video' },
-      { keys: ['o'], help: 'Open on YouTube in new tab' },
-      { keys: ['u'], help: 'Undo last dismiss' },
+      { keys: ['/'], help: 'Focus pool search' },
+      { keys: ['Delete'], help: 'Clear focused slot' },
+      { keys: ['n'], help: 'New draft (when none exists)' },
     ],
   },
   {

@@ -1,153 +1,165 @@
+import Link from 'next/link';
+import { headers } from 'next/headers';
 import { getDb } from '../lib/db';
-import { getLiveNowVideos } from '../lib/consumption';
+import { getStoredToken } from '../lib/youtube-oauth';
 import {
-  effectiveCoverId,
-  getOrPublishTodaysIssue,
-  loadIssueVideos,
-  pickBriefs,
-} from '../lib/issue';
+  getDraftIssue,
+  getIssueSlots,
+  getInboxPool,
+} from '../lib/issues';
+import { isMobileUserAgent } from '../lib/device';
 import { TopNav } from '../components/issue/TopNav';
-import { Masthead } from '../components/issue/Masthead';
-import { Cover } from '../components/issue/Cover';
-import { Featured } from '../components/issue/Featured';
-import {
-  Departments,
-  type DepartmentRow,
-} from '../components/issue/Departments';
-import { Briefs } from '../components/issue/Briefs';
-import { TagsStrip, type TagRow } from '../components/issue/TagsStrip';
+import { Kicker } from '../components/ui/Kicker';
 import { Rule } from '../components/ui/Rule';
-import { listTags, getTagCounts } from '../lib/tags';
+import { EditorWorkspace } from '../components/workspace/EditorWorkspace';
+import { NewDraftButton } from '../components/workspace/NewDraftButton';
 
 export const dynamic = 'force-dynamic';
 
-function loadDepartments(): DepartmentRow[] {
+function getCorpusSize(): { videos: number; channels: number } {
   const db = getDb();
-  const sectionRows = db
-    .prepare(
-      `SELECT s.id, s.name,
-              COALESCE(
-                (SELECT COUNT(*)
-                   FROM videos v
-                   JOIN consumption c ON c.video_id = v.id
-                   JOIN channels ch   ON ch.id      = v.channel_id
-                  WHERE ch.section_id = s.id AND c.status = 'inbox'), 0)
-                AS inbox_count
-         FROM sections s
-        ORDER BY s.sort_order ASC, s.name ASC`,
-    )
-    .all() as Array<{ id: number; name: string; inbox_count: number }>;
-
-  const unsorted = db
-    .prepare(
-      `SELECT COUNT(*) AS n
-         FROM videos v
-         JOIN consumption c ON c.video_id = v.id
-         JOIN channels ch   ON ch.id      = v.channel_id
-        WHERE ch.section_id IS NULL AND c.status = 'inbox'`,
-    )
-    .get() as { n: number };
-
-  const sorted = [...sectionRows]
-    .sort((a, b) => b.inbox_count - a.inbox_count)
-    .slice(0, 6);
-
-  const rows: DepartmentRow[] = sorted.map((r) => {
-    const channels = db
-      .prepare(
-        `SELECT ch.name
-           FROM channels ch
-          WHERE ch.section_id = ?
-          ORDER BY ch.last_checked_at DESC
-          LIMIT 3`,
-      )
-      .all(r.id) as Array<{ name: string }>;
-    return {
-      id: r.id,
-      name: r.name,
-      inboxCount: r.inbox_count,
-      topChannels: channels.map((c) => c.name),
-    };
-  });
-
-  if (unsorted.n > 0) {
-    rows.push({
-      id: null,
-      name: 'Unsorted',
-      inboxCount: unsorted.n,
-      topChannels: [],
-    });
-  }
-
-  return rows;
+  const v = db.prepare(`SELECT COUNT(*) AS n FROM videos`).get() as { n: number };
+  const c = db.prepare(`SELECT COUNT(*) AS n FROM channels`).get() as { n: number };
+  return { videos: v.n, channels: c.n };
 }
 
-export default function Home() {
-  const issue = getOrPublishTodaysIssue();
-  const liveNow = getLiveNowVideos();
-  const coverId = effectiveCoverId(issue);
-  const featuredIds = issue.featured_video_ids;
-  const usedIds = new Set<string>();
-  if (coverId) usedIds.add(coverId);
-  for (const id of featuredIds) usedIds.add(id);
+export default async function Home() {
+  const h = await headers();
+  const ua = h.get('user-agent');
+  const mobile = isMobileUserAgent(ua);
 
-  const briefIds = pickBriefs(usedIds, 10);
-  const allIds = [
-    ...(coverId ? [coverId] : []),
-    ...featuredIds,
-    ...briefIds,
-  ];
-  const videoMap = loadIssueVideos(allIds);
+  const connected = !!getStoredToken();
+  const { videos, channels } = connected
+    ? getCorpusSize()
+    : { videos: 0, channels: 0 };
 
-  const cover = coverId ? videoMap.get(coverId) ?? null : null;
-  const featured = featuredIds
-    .map((id) => videoMap.get(id))
-    .filter((v): v is NonNullable<typeof v> => !!v);
-  const briefs = briefIds
-    .map((id) => videoMap.get(id))
-    .filter((v): v is NonNullable<typeof v> => !!v);
-
-  const departments = loadDepartments();
-  const pinned = !!(issue.pinned_cover_video_id && coverId === issue.pinned_cover_video_id);
-
-  const tagCounts = getTagCounts();
-  const tagRows: TagRow[] = listTags()
-    .map((t) => ({ id: t.id, name: t.name, inboxCount: tagCounts.get(t.id) ?? 0 }))
-    .filter((r) => r.inboxCount > 0)
-    .sort((a, b) => b.inboxCount - a.inboxCount);
+  const workspaceBranch = connected && videos > 0;
 
   return (
-    <div className="mx-auto w-full max-w-5xl px-6 pb-16">
+    <div
+      className={`mx-auto w-full px-6 pb-16 ${
+        workspaceBranch && !mobile ? 'max-w-7xl' : 'max-w-3xl'
+      }`}
+    >
       <div className="pt-6">
         <TopNav />
       </div>
-      <Masthead
-        issueNumber={issue.id}
-        issueDate={issue.created_at}
-        liveVideos={liveNow}
+
+      {!workspaceBranch && (
+        <>
+          <header className="mt-12">
+            <div className="font-sans text-[11px] font-semibold uppercase tracking-[0.18em] text-oxblood">
+              Folio
+            </div>
+            <h1 className="mt-2 font-[var(--font-serif-display)] text-6xl font-medium italic tracking-tight">
+              A personal video magazine.
+            </h1>
+          </header>
+          <Rule thick className="my-10" />
+        </>
+      )}
+
+      {!connected && (
+        <section>
+          <Kicker>Get started</Kicker>
+          <p className="mt-3 font-[var(--font-serif-display)] text-2xl italic leading-snug text-ink-soft">
+            Connect your YouTube account to begin seeding your library.
+          </p>
+          <Link
+            href="/settings/youtube"
+            className="mt-6 inline-block bg-oxblood px-4 py-2 font-sans text-[11px] font-semibold uppercase tracking-[0.16em] text-paper hover:bg-ink"
+          >
+            Go to settings
+          </Link>
+        </section>
+      )}
+
+      {connected && videos === 0 && (
+        <section>
+          <Kicker>Next step</Kicker>
+          <p className="mt-3 font-[var(--font-serif-display)] text-2xl italic leading-snug text-ink-soft">
+            Import your library to get started.
+          </p>
+          <Link
+            href="/settings/youtube"
+            className="mt-6 inline-block bg-oxblood px-4 py-2 font-sans text-[11px] font-semibold uppercase tracking-[0.16em] text-paper hover:bg-ink"
+          >
+            Import from YouTube
+          </Link>
+        </section>
+      )}
+
+      {workspaceBranch && mobile && (
+        <section className="mt-12">
+          <Kicker>Desktop only</Kicker>
+          <p className="mt-3 font-[var(--font-serif-display)] text-2xl italic leading-snug text-ink-soft">
+            The editor workspace is desktop-only. Open Folio on a larger screen
+            to compose an issue.
+          </p>
+          <div className="mt-6 flex flex-wrap gap-4">
+            <Link
+              href="/library"
+              className="font-sans text-[11px] font-semibold uppercase tracking-[0.16em] text-ink hover:text-oxblood"
+            >
+              Library →
+            </Link>
+            <Link
+              href="/issues"
+              className="font-sans text-[11px] font-semibold uppercase tracking-[0.16em] text-ink hover:text-oxblood"
+            >
+              Published issues →
+            </Link>
+          </div>
+        </section>
+      )}
+
+      {workspaceBranch && !mobile && <WorkspaceBranch videos={videos} channels={channels} />}
+    </div>
+  );
+}
+
+function WorkspaceBranch({
+  videos,
+  channels,
+}: {
+  videos: number;
+  channels: number;
+}) {
+  const draft = getDraftIssue();
+
+  if (!draft) {
+    return (
+      <section className="mt-12">
+        <Kicker>Compose</Kicker>
+        <h1 className="mt-2 font-[var(--font-serif-display)] text-5xl font-medium italic tracking-tight">
+          No draft yet.
+        </h1>
+        <p className="mt-3 font-[var(--font-serif-display)] text-xl italic leading-snug text-ink-soft">
+          Start a new issue — pick a cover, three featured pieces, and up to ten
+          briefs from your library.
+        </p>
+        <div className="mt-6">
+          <NewDraftButton />
+        </div>
+        <Rule className="my-10" />
+        <p className="font-sans text-xs italic text-ink-soft/80">
+          {videos} {videos === 1 ? 'video' : 'videos'} across {channels}{' '}
+          {channels === 1 ? 'channel' : 'channels'} in your library.
+        </p>
+      </section>
+    );
+  }
+
+  const slots = getIssueSlots(draft.id);
+  const pool = getInboxPool(draft.id);
+
+  return (
+    <div className="mt-8">
+      <EditorWorkspace
+        initialIssue={draft}
+        initialSlots={slots}
+        initialPool={pool}
       />
-      <Rule thick className="mt-6" />
-      <Cover cover={cover} pinned={pinned} />
-      {cover && (
-        <>
-          <Rule thick />
-          <Featured videos={featured} />
-        </>
-      )}
-      <Rule thick />
-      <Departments rows={departments} />
-      {tagRows.length > 0 && (
-        <>
-          <Rule thick />
-          <TagsStrip rows={tagRows} />
-        </>
-      )}
-      {briefs.length > 0 && (
-        <>
-          <Rule thick />
-          <Briefs videos={briefs} />
-        </>
-      )}
     </div>
   );
 }

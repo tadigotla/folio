@@ -111,11 +111,19 @@ The system SHALL represent live streams as a facet of a video via `is_live_now` 
 - **THEN** `consumption.status` SHALL remain `saved` (or whatever the user last set), not be auto-promoted
 
 ### Requirement: OAuth tokens stub table
-The system SHALL provision an `oauth_tokens` table with columns: `provider` (primary key), `access_token`, `refresh_token`, `expires_at`, `scope`, `updated_at`. The table SHALL exist but remain empty; no code path in this change reads or writes it.
+The system SHALL provision an `oauth_tokens` table with columns: `provider` (primary key), `access_token`, `refresh_token`, `expires_at`, `scope`, `updated_at`. The table SHALL be populated by the `youtube-oauth` capability; it is no longer a stub. Exactly zero or one row per provider value SHALL exist at any time. A row for `provider = 'youtube'` indicates the user has connected their YouTube account; absence indicates disconnected state.
 
 #### Scenario: Table exists post-migration
 - **WHEN** migrations are applied
-- **THEN** the `oauth_tokens` table SHALL exist and be empty
+- **THEN** the `oauth_tokens` table SHALL exist with the column schema above
+
+#### Scenario: Connected-state invariant
+- **WHEN** the app is running and any module needs to check YouTube connection state
+- **THEN** the presence of a row with `provider = 'youtube'` in `oauth_tokens` SHALL be the single source of truth for "connected"
+
+#### Scenario: Disconnected-state invariant
+- **WHEN** the user disconnects via `/api/youtube/oauth/disconnect`
+- **THEN** the row for `provider = 'youtube'` SHALL be deleted, and no other state (videos, channels, consumption, provenance) SHALL be modified as a side-effect
 
 ### Requirement: Highlights stub table
 The system SHALL provision a `highlights` table with columns: `id` (autoincrement primary key), `video_id` (references `videos.id`), `timestamp_seconds`, `text` (nullable), `created_at`. The table SHALL exist but remain empty; no code path in this change reads or writes it.

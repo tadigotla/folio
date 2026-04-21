@@ -1,137 +1,206 @@
 # Runbook
-_Last verified: 2026-04-21 (mag-look)_
+_Last verified: 2026-04-21 (editor-workspace)_
 
 ## Overview
-Personal YouTube-primary video library. Single-process Next.js 16 app (React 19)
-on port **6060**, reading/writing a local SQLite file (`events.db` at the repo
-root — still named `events.db` for historical reasons; it now holds `videos`,
-`channels`, `consumption`, etc.). An ingestion orchestrator
-(`scripts/run-fetchers.ts`) is invoked every **30 minutes** by **user crontab**
-on this laptop to refresh video data from YouTube RSS feeds. No Docker, no prod
-deployment, no staging — this runs locally only.
+Folio — a personal YouTube-library magazine. Single-process Next.js 16 app
+(React 19) on port **6060**, reading/writing a local SQLite file (`events.db`
+at the repo root — still named `events.db` for historical reasons; it now
+holds `videos`, `channels`, `consumption`, `video_provenance`, `import_log`,
+etc.). All corpus data is imported **on demand** from the user's YouTube
+account via the `/settings/youtube` page. No cron, no background jobs, no
+Docker, no prod deployment, no staging — this runs locally only.
 
 ## Services & Ports
-| Service        | Port | Purpose                                                   |
-|----------------|------|-----------------------------------------------------------|
-| `next dev`     | 6060 | Web UI + API routes. Launched foreground via `just dev`.  |
-| fetcher (cron) | —    | `npm run fetch` every 30 min. Logs to `.logs/fetch.log`.  |
-| SQLite         | —    | File at `./events.db` (+ `-wal`, `-shm`). WAL mode.       |
+| Service    | Port | Purpose                                                   |
+|------------|------|-----------------------------------------------------------|
+| `next dev` | 6060 | Web UI + API routes. Launched foreground via `just dev`.  |
+| SQLite     | —    | File at `./events.db` (+ `-wal`, `-shm`). WAL mode.       |
 
 ## Quick start — `just dev`
 1. `npm install` (first time only).
-2. `just seed` — applies migrations and upserts the seed rows in `sources`. Safe to re-run.
+2. Copy `.env.example` to `.env` and fill in `YOUTUBE_OAUTH_CLIENT_ID` /
+   `YOUTUBE_OAUTH_CLIENT_SECRET` (see "YouTube OAuth" below).
 3. `just dev` — foreground Next.js dev server on http://localhost:6060.
-4. (Optional) `just cron-install` — adds the every-30-min fetcher entry to your user crontab.
-   Without it, data only refreshes when you run `just fetch` by hand.
+   Migrations run automatically on boot, including the library-pivot
+   migration `010_library_pivot.sql` which creates an empty corpus on a
+   first boot.
+4. Visit http://localhost:6060/settings/youtube and click **Connect
+   YouTube account**. After consent you'll land back on the settings page
+   with Import buttons enabled.
 
-## Before risky migrations — `just backup-db`
-Any migration that can move or destroy data (e.g. the videos pivot in
-`003_videos_schema.sql` / `004_backfill_from_events.sql` / `005_drop_events.sql`)
-MUST be preceded by a backup. `just backup-db` checkpoints WAL and writes
-`events.db.YYYYMMDD-HHMMSS.bak` alongside the live DB. To roll back after a
-botched migration, stop the dev server and the fetcher cron, then
-`cp events.db.<stamp>.bak events.db` (removing `-wal`/`-shm` alongside).
+## Before risky migrations — **`just backup-db`**
+**Any destructive migration MUST be preceded by `just backup-db`.** The
+library-pivot migration (`010_library_pivot.sql`) drops the `sources` and
+`issues` tables and truncates `videos`, `channels`, `consumption`,
+`channel_tags`, `sections`, and `tags`. It is the intended one-time reset
+for the Phase 1 pivot — but if you are re-applying it on a DB that already
+holds content, back up first.
+
+`just backup-db` checkpoints WAL and writes `events.db.YYYYMMDD-HHMMSS.bak`
+alongside the live DB. To roll back after a botched migration:
+
+1. Stop the dev server.
+2. `cp events.db.<stamp>.bak events.db` (and delete any `-wal`/`-shm`
+   siblings).
+3. `git revert` the migration commit so the migration runner does not
+   re-apply the migration on next boot.
+
+Both steps are required — the restored backup contains a `_migrations` row
+marking the migration as applied, so without the git revert the runner
+would re-apply the migration on next boot.
 
 ## Is it running? — `just status`
 Shows:
 - Anything listening on `:6060` (the dev server).
-- Whether the fetcher cron entry for this checkout is installed.
 - Size/presence of `events.db` and its WAL files.
 
 ## Stop everything — `just down`
-Kills any process holding `:6060`. The fetcher cron keeps firing
-independently — run `just cron-uninstall` if you want it off too.
+Kills any process holding `:6060`.
 
 ## Environments
 - **Local (only):** macOS, Node 24 (`v24.13.1` tested), `npm`/`npx tsx`. Port 6060.
-  Secrets live in `.env.local` (currently only `YOUTUBE_API_KEY`, optional —
-  YouTube ingestion falls back to RSS if empty).
+  Secrets live in `.env` / `.env.local`.
 - **Staging:** none.
 - **Production:** none. Do not run `npm start` — the project is dev-only.
 
-## Fetcher cron
-- `just cron-install` writes a line tagged with a per-checkout marker
-  (`# folio:fetch (<repo path>)`) so re-installing is idempotent and
-  multiple checkouts don't collide. The installed entry fires every 30 min
-  (`*/30 * * * *`).
-- The line invokes the fetcher via a login zsh (`/bin/zsh -lc`) so it
-  picks up whichever `node`/`npm` your shell uses (nvm, Homebrew, etc.).
-- Output (stdout + stderr) appends to `.logs/fetch.log` in the repo.
-  `.logs/` is created by the recipe; add it to `.gitignore` if it isn't already.
-- `just cron-uninstall` removes only the line for this checkout.
-
-## Magazine issues
-
-The home page at `/` is a daily magazine view. Composition is **frozen at first open** each day: the first GET on a new local-day (America/New_York) computes a new issue row (`issues` table) and renders it; subsequent opens the same day render the same composition. To recompose explicitly, click **↻ Publish new** in the masthead — this inserts a fresh `issues` row and redirects.
-
-- `issues.cover_video_id` is deterministic (affinity × recency × duration depth; see `src/lib/issue.ts`). `pinned_cover_video_id` overrides it as long as the pinned video is still inbox-valid; if the user archives or dismisses the pin, the rule-picked cover resumes silently.
-- `issues.featured_video_ids` is a JSON array (up to 3 video IDs).
-- The `sections` table plus `channels.section_id` (added in migration `008_magazine.sql`) power the departments strip and `/section/[slug]` pages. A channel with `section_id IS NULL` is "Unsorted".
-- Tags are an additive secondary taxonomy: `tags` + `channel_tags` join (migration `009_tags.sql`). Channels can carry multiple tags; `/tag/[slug]` lists the inbox videos from channels carrying a tag. Tag management lives on `/sections` — each channel row has a Tags popover next to its Section chip.
-- Freeze check compares local-date (America/New_York) — crossing midnight opens a new issue on next visit.
-
 ## YouTube OAuth
-The app can import the user's YouTube subscriptions as per-channel `sources`
-rows so new subs appear automatically. OAuth is used **only** to discover
-*which* channels to poll — video listing still goes through RSS (quota-free).
+The app imports the user's YouTube library (Likes, Subscription uploads,
+user-owned Playlists) via the YouTube Data API v3 with the
+`https://www.googleapis.com/auth/youtube.readonly` scope. Read-only; Folio
+never modifies your YouTube state.
 
 ### One-time Google Cloud setup
 1. Create a project at https://console.cloud.google.com/.
 2. **APIs & Services → Library → YouTube Data API v3 → Enable**.
-3. **APIs & Services → OAuth consent screen** — pick **External**, fill in the
-   minimum required fields, leave the app unpublished (**Testing**), and add
-   your own Google account as a **Test user**. The consent screen will warn
-   "Google hasn't verified this app" on sign-in — expected for a single-user
-   local install.
+3. **APIs & Services → OAuth consent screen** — pick **External**, fill in
+   the minimum required fields, leave the app unpublished (**Testing**),
+   and add your own Google account as a **Test user**. The consent screen
+   will warn "Google hasn't verified this app" on sign-in — click
+   **Advanced → Go to Folio (unsafe)**. Expected for a single-user local
+   install.
 4. **APIs & Services → Credentials → Create Credentials → OAuth client ID**,
    Application type **Web application**. Add authorized redirect URI:
    `http://localhost:6060/api/youtube/oauth/callback`. The port must match
-   `next dev` (6060); if you change ports you must update the redirect URI.
-5. Copy the client ID and client secret into `.env.local`:
+   `next dev` (**6060**). If you change ports, update this URI in Google
+   Cloud Console and update the hardcoded `REDIRECT_URI` in
+   `src/lib/youtube-oauth.ts`.
+5. Copy the client ID and client secret into `.env`:
    ```
    YOUTUBE_OAUTH_CLIENT_ID=...
    YOUTUBE_OAUTH_CLIENT_SECRET=...
    ```
 6. Restart `just dev` and visit http://localhost:6060/settings/youtube →
-   **Connect YouTube account**. Consent, and you'll land back on the settings
-   page with an imported-channel count.
+   **Connect YouTube account**. Consent, then you'll land back with Import
+   buttons.
 
 ### Where tokens live
 Tokens are stored in the `oauth_tokens` table inside `events.db`, NOT in
-`.env*`. The row is keyed on `provider = 'youtube'`. The DB file is gitignored
-alongside the rest of app state. Disconnect from `/settings/youtube` deletes
-that row; optionally disables all imported user sources.
+`.env*`. The row is keyed on `provider = 'youtube'`. The DB file is
+gitignored alongside the rest of app state. The access token is refreshed
+lazily on each API call when it's within 60 seconds of expiry.
 
-### Re-syncing
-Subscription sync runs automatically once per fetcher cron tick (every
-30 min). Force a run with `just youtube-sync` or the **Re-sync now** button
-on `/settings/youtube`. Failures are captured in the synthetic
-`youtube_subscriptions_meta` row in `sources` (`last_fetched_at` =
-last success, `last_error` = last failure message) and surfaced on the
-settings page.
+### Forcing re-auth
+Click **Disconnect** on `/settings/youtube` — this deletes the
+`oauth_tokens` row only. The imported corpus (videos, channels,
+consumption, provenance) is untouched. Click **Connect** again to re-grant.
 
-### Troubleshooting
-- **"Reconnect required" banner on settings page** — the stored refresh token
-  was revoked (manually, via Google security settings, or by prolonged
-  inactivity). Click Connect to re-consent. Existing user sources keep
-  polling via RSS in the meantime.
-- **"Missing YOUTUBE_OAUTH_CLIENT_ID"** at `/api/youtube/oauth/authorize` —
-  env vars not loaded. Restart `just dev` after editing `.env.local`.
+To revoke Folio's access from Google's side, visit
+https://myaccount.google.com/permissions. After revocation, the next
+import will fail with HTTP 409 and the settings page will show a
+**Reconnect YouTube** banner.
+
+## Importing your library
+All imports are manual. Run them whenever you want; each is idempotent
+(existing consumption state is preserved).
+
+| Button | What it imports | Default consumption status | Signal weight |
+|---|---|---|---|
+| **Import likes** | Every video in your YouTube Likes (paginates through `LL`). | `saved` | 1.0 |
+| **Import subscriptions** | The N most-recent uploads per subscribed channel (N = `YOUTUBE_SUBSCRIPTION_UPLOAD_LIMIT`, default 25). | `inbox` | 0.3 |
+| **Load my playlists → Import** | All items in a user-selected playlist. | `saved` | 0.7 |
+
+Signal weight is written to `video_provenance.signal_weight` and is
+consumed by a future Phase 4 curation agent; Phase 1 records it but does
+not use it for ranking. A video imported by multiple routes gets multiple
+`video_provenance` rows.
+
+Quota notes: `playlistItems.list` and `subscriptions.list` are 1 unit per
+page. Importing ~10k Likes (200 pages) + 100 subs + a handful of playlists
+is comfortably under the 10,000 units/day default quota.
+
+## Data reset
+The library-pivot migration (`010_library_pivot.sql`) is destructive: it
+drops the legacy `sources` and `issues` tables and truncates the content
+tables (`videos`, `channels`, `consumption`, `channel_tags`, `sections`,
+`tags`). It runs automatically on next boot after the migration file
+lands in `db/migrations/`.
+
+**Before the first boot with this migration** present:
+
+1. `just backup-db` — write a timestamped copy of the pre-reset state.
+2. Confirm the backup file exists and is non-empty.
+3. Start `just dev` — migration runs, DB is reset, app boots into the
+   "not connected" state.
+4. Connect YouTube and import (see above).
+
+**Rollback** is the two-step procedure in the "Before risky migrations"
+section above: restore the backup **and** `git revert` the migration
+commit.
+
+## Editor workspace
+The home page at `/` is the editor when a corpus is present. Compose an
+issue by dragging videos from the inbox **pool** (right column) onto the
+slots on the **board** (left column). Each issue has exactly 14 slots:
+1 cover, 3 featured, 10 briefs. Empty slots render as dashed placeholders.
+
+### Lifecycle
+- `draft → published`, one direction. Published issues are frozen — the
+  API rejects slot mutations on them with HTTP 409 `issue_frozen`.
+- **At most one draft at a time.** `POST /api/issues` returns HTTP 409
+  `{ error: 'draft_exists', draft_id }` if a draft already exists. The
+  **Discard** button in the workspace header deletes the current draft
+  (and all its slot assignments) so a new one can be started.
+- Publishing a **partial** issue is allowed — any slot count from 1 to 14
+  will publish. Empty slots render as muted placeholders on `/issues/[id]`.
+- Assigning an inbox video to any slot auto-promotes its consumption
+  status `inbox → saved` in the same transaction. Clearing or swapping a
+  slot does **not** demote.
+
+### Where published issues live
+- `/issues` — reverse-chron grid of all published issues.
+- `/issues/[id]` — read-only magazine-style view.
+
+### Desktop only
+The drag-and-drop workspace is **desktop-only**. On a mobile user agent
+the home page renders an "open on desktop" message; `/library`,
+`/issues`, `/issues/[id]`, and `/watch/[id]` remain fully mobile. There
+is no touch drag-and-drop fallback in this phase.
+
+### URL change
+`/inbox` has been **removed**. Triage now happens inside the editor
+workspace by dragging videos from the pool into slots, or dismissing
+them with the hover button on the pool card. Bookmarks to `/inbox`
+will 404.
 
 ## Troubleshooting
-- **"Port 6060 in use"** — `just down`, or `lsof -i :6060` to see what's holding it.
-- **"Fetcher hasn't run"** — `just status` to confirm the cron entry is installed.
-  `tail -f .logs/fetch.log` (or `just logs`) to watch the next tick.
-  Run `just fetch` once to force a fetch and see errors inline.
-- **"DB is locked" / busy** — SQLite busy timeout is 5s. If a long `just fetch`
-  is running, the dev server will wait; don't hold a `sqlite3 events.db`
-  shell open while writing.
-- **"Migrations out of sync"** — `just seed` reapplies migrations (tracked in
-  the `_migrations` table) and re-upserts seed rows. Safe to re-run. Take a
-  backup first with `just backup-db` if you are worried.
-- **"YouTube channel fetcher errors"** — dynamic sources (`id LIKE '%_user'`)
-  are built per-request; check `sources.last_error` in `events.db` for the
-  captured message. An empty `YOUTUBE_API_KEY` is fine — RSS is the primary path.
-- **"Where did dev server logs go?"** — `next dev` runs in the foreground.
-  Logs only exist in whatever terminal ran `just dev`. There is no log file
-  for the dev server by design.
+- **"Port 6060 in use"** — `just down`, or `lsof -i :6060` to see what's
+  holding it.
+- **"Reconnect required" banner on settings page** — the stored refresh
+  token was revoked (manually, via Google security settings, or by
+  prolonged inactivity). Click Connect to re-consent. Imports will
+  resume; the existing corpus is untouched.
+- **"Missing YOUTUBE_OAUTH_CLIENT_ID"** at
+  `/api/youtube/oauth/authorize` — env vars not loaded. Restart
+  `just dev` after editing `.env` / `.env.local`.
+- **Import button returns an error with HTTP 403 / quota** — you've
+  exhausted the daily YouTube API quota. Wait until midnight Pacific and
+  retry. See quota notes above.
+- **"DB is locked" / busy** — SQLite busy timeout is 5s. Don't hold a
+  `sqlite3 events.db` shell open while the dev server is writing.
+- **"Where did dev server logs go?"** — `next dev` runs in the
+  foreground. Logs only exist in whatever terminal ran `just dev`.
+- **`/inbox` returns 404** — expected. The raw inbox page was removed
+  in the editor-workspace change; use the editor at `/` instead.
+- **Can't start a new issue, button is missing** — there is already a
+  draft. Either finish it (Publish), or click **Discard** on the
+  workspace header to throw it away. Only one draft may exist at a time.

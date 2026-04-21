@@ -1,16 +1,8 @@
 import { headers } from 'next/headers';
 import { notFound } from 'next/navigation';
 import { getDb } from '../../../lib/db';
-import { getVideoById } from '../../../lib/consumption';
+import { getVideoById, type VideoWithSection } from '../../../lib/consumption';
 import { formatDuration, relativeTime, toLocalDateTime } from '../../../lib/time';
-import {
-  getIssueOrder,
-  getOrPublishTodaysIssue,
-  loadIssueVideos,
-  pickBriefs,
-  effectiveCoverId,
-  type IssueVideo,
-} from '../../../lib/issue';
 import { Player } from '../../../components/Player';
 import { TopNav } from '../../../components/issue/TopNav';
 import { Kicker } from '../../../components/ui/Kicker';
@@ -47,13 +39,17 @@ function loadNextInSection(
   sectionId: number | null,
   excludeId: string,
   limit = 3,
-): IssueVideo[] {
+): VideoWithSection[] {
   const db = getDb();
   const rows =
     sectionId === null
       ? (db
           .prepare(
-            `SELECT v.*, ch.name AS channel_name, ch.section_id AS section_id, NULL AS section_name
+            `SELECT v.*,
+                    c.status, c.status_changed_at, c.last_viewed_at, c.last_position_seconds,
+                    ch.name AS channel_name,
+                    ch.section_id AS section_id,
+                    NULL AS section_name
                FROM videos v
                JOIN consumption c ON c.video_id = v.id
                JOIN channels ch   ON ch.id      = v.channel_id
@@ -61,10 +57,14 @@ function loadNextInSection(
               ORDER BY v.published_at DESC
               LIMIT ?`,
           )
-          .all(excludeId, limit) as IssueVideo[])
+          .all(excludeId, limit) as VideoWithSection[])
       : (db
           .prepare(
-            `SELECT v.*, ch.name AS channel_name, ch.section_id AS section_id, s.name AS section_name
+            `SELECT v.*,
+                    c.status, c.status_changed_at, c.last_viewed_at, c.last_position_seconds,
+                    ch.name AS channel_name,
+                    ch.section_id AS section_id,
+                    s.name AS section_name
                FROM videos v
                JOIN consumption c ON c.video_id = v.id
                JOIN channels ch   ON ch.id      = v.channel_id
@@ -73,7 +73,7 @@ function loadNextInSection(
               ORDER BY v.published_at DESC
               LIMIT ?`,
           )
-          .all(sectionId, excludeId, limit) as IssueVideo[]);
+          .all(sectionId, excludeId, limit) as VideoWithSection[]);
   return rows;
 }
 
@@ -90,13 +90,10 @@ export default async function WatchPage({
 
   const section = getSectionForVideo(video.id);
   const sections = listSections();
-  const issue = getOrPublishTodaysIssue();
-  const order = getIssueOrder(issue);
-  const currentIdx = order.indexOf(video.id);
-  const nextId = currentIdx >= 0 && currentIdx < order.length - 1 ? order[currentIdx + 1] : null;
-  const prevId = currentIdx > 0 ? order[currentIdx - 1] : null;
 
   const nextInSection = loadNextInSection(section.section_id, video.id, 3);
+  const nextId = nextInSection[0]?.id ?? null;
+  const prevId: string | null = null;
 
   const h = await headers();
   const ua = h.get('user-agent');
@@ -116,22 +113,6 @@ export default async function WatchPage({
       </div>
     );
   }
-
-  const coverId = effectiveCoverId(issue);
-  const alsoIds: string[] = [];
-  if (coverId && coverId !== video.id) alsoIds.push(coverId);
-  for (const id of issue.featured_video_ids) {
-    if (id !== video.id && !alsoIds.includes(id)) alsoIds.push(id);
-  }
-  const briefExclude = new Set([video.id, ...alsoIds]);
-  const briefs = pickBriefs(briefExclude, 3);
-  for (const id of briefs) {
-    if (!alsoIds.includes(id)) alsoIds.push(id);
-  }
-  const alsoMap = loadIssueVideos(alsoIds);
-  const alsoVideos = alsoIds
-    .map((id) => alsoMap.get(id))
-    .filter((v): v is IssueVideo => !!v);
 
   const duration = formatDuration(video.duration_seconds);
   const published = video.published_at ? relativeTime(video.published_at) : null;
@@ -196,7 +177,6 @@ export default async function WatchPage({
       <NextPieceFooter
         sectionName={section.section_name}
         nextInSection={nextInSection}
-        alsoInIssue={alsoVideos}
       />
     </div>
   );

@@ -2,10 +2,10 @@ import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
 import type { NextRequest } from 'next/server';
 import {
-  exchangeCodeForTokens,
+  exchangeCode,
   upsertToken,
+  verifyState,
 } from '../../../../../lib/youtube-oauth';
-import { recordSyncError, syncSubscriptions } from '../../../../../lib/subscription-sync';
 
 const STATE_COOKIE = 'youtube_oauth_state';
 
@@ -16,32 +16,26 @@ export async function GET(request: NextRequest) {
   const state = params.get('state');
 
   const jar = await cookies();
-  const cookieState = jar.get(STATE_COOKIE)?.value;
-  jar.delete(STATE_COOKIE);
+  const cookieValue = jar.get(STATE_COOKIE)?.value;
 
   if (error === 'access_denied') {
+    jar.delete(STATE_COOKIE);
     redirect('/settings/youtube?error=access_denied');
   }
   if (error) {
+    jar.delete(STATE_COOKIE);
     redirect(`/settings/youtube?error=${encodeURIComponent(error)}`);
   }
   if (!code || !state) {
     return new Response('missing code or state', { status: 400 });
   }
-  if (!cookieState || cookieState !== state) {
-    return new Response('state mismatch', { status: 400 });
+  if (!verifyState(cookieValue, state)) {
+    return new Response('state mismatch or expired', { status: 400 });
   }
 
-  const tokens = await exchangeCodeForTokens(code);
+  const tokens = await exchangeCode(code);
   upsertToken(tokens);
-
-  try {
-    await syncSubscriptions();
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    recordSyncError(message);
-    console.error(`Initial subscription sync failed: ${message}`);
-  }
+  jar.delete(STATE_COOKIE);
 
   redirect('/settings/youtube?connected=1');
 }

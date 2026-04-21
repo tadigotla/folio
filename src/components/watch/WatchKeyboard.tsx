@@ -39,7 +39,6 @@ export function WatchKeyboard({ videoId, currentStatus, nextId, prevId }: Props)
   const router = useRouter();
   const [strip, setStrip] = useState<{ label: string; id: number } | null>(null);
   const [endOfIssue, setEndOfIssue] = useState(false);
-  const [pinned, setPinned] = useState(false);
   const pendingRef = useRef<{
     id: number;
     kind: UndoKind;
@@ -47,18 +46,11 @@ export function WatchKeyboard({ videoId, currentStatus, nextId, prevId }: Props)
     timer: ReturnType<typeof setTimeout> | null;
   } | null>(null);
   const endTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pinTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const flashEnd = useCallback(() => {
     setEndOfIssue(true);
     if (endTimer.current) clearTimeout(endTimer.current);
     endTimer.current = setTimeout(() => setEndOfIssue(false), 1200);
-  }, []);
-
-  const flashPinned = useCallback(() => {
-    setPinned(true);
-    if (pinTimer.current) clearTimeout(pinTimer.current);
-    pinTimer.current = setTimeout(() => setPinned(false), 1200);
   }, []);
 
   const clearPending = useCallback(() => {
@@ -114,17 +106,6 @@ export function WatchKeyboard({ videoId, currentStatus, nextId, prevId }: Props)
     router.refresh();
   }, [router, videoId]);
 
-  const pinCover = useCallback(async () => {
-    try {
-      const res = await fetch('/api/issues/cover-pin', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ videoId }),
-      });
-      if (res.ok) flashPinned();
-    } catch {}
-  }, [flashPinned, videoId]);
-
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (isTextEntry(document.activeElement)) return;
@@ -161,20 +142,15 @@ export function WatchKeyboard({ videoId, currentStatus, nextId, prevId }: Props)
           e.preventDefault();
           void doTransition('dismiss');
           break;
-        case '.':
-          e.preventDefault();
-          void pinCover();
-          break;
       }
     }
     window.addEventListener('keydown', onKey);
     return () => {
       window.removeEventListener('keydown', onKey);
       if (endTimer.current) clearTimeout(endTimer.current);
-      if (pinTimer.current) clearTimeout(pinTimer.current);
       if (pendingRef.current?.timer) clearTimeout(pendingRef.current.timer);
     };
-  }, [doTransition, flashEnd, nextId, pinCover, prevId, router, undo]);
+  }, [doTransition, flashEnd, nextId, prevId, router, undo]);
 
   return (
     <>
@@ -203,12 +179,7 @@ export function WatchKeyboard({ videoId, currentStatus, nextId, prevId }: Props)
       )}
       {endOfIssue && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 bg-sage px-3 py-2 font-sans text-[11px] uppercase tracking-[0.14em] text-paper">
-          End of issue.
-        </div>
-      )}
-      {pinned && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 bg-oxblood px-3 py-2 font-sans text-[11px] uppercase tracking-[0.14em] text-paper">
-          Pinned as cover.
+          End of queue.
         </div>
       )}
     </>

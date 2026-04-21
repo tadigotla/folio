@@ -1,17 +1,3 @@
-export type SourceKind = 'youtube_channel';
-
-export interface Source {
-  id: string;
-  name: string;
-  kind: SourceKind;
-  config: Record<string, unknown>;
-  enabled: number;
-  min_interval_minutes: number;
-  last_fetched_at: string | null;
-  next_fetch_after: string | null;
-  last_error: string | null;
-}
-
 export interface Channel {
   id: string;
   name: string;
@@ -34,14 +20,6 @@ export interface Tag {
   name: string;
   sort_order: number;
   created_at: string;
-}
-
-export interface Issue {
-  id: number;
-  created_at: string;
-  cover_video_id: string | null;
-  featured_video_ids: string[];
-  pinned_cover_video_id: string | null;
 }
 
 export interface Video {
@@ -77,21 +55,47 @@ export interface Consumption {
   last_position_seconds: number | null;
 }
 
-export interface NormalizedVideo {
-  videoId: string;
-  title: string;
-  description?: string;
-  channelId: string;
-  channelName: string;
-  publishedAt: string;
-  durationSeconds?: number;
-  thumbnailUrl?: string;
-  isLiveNow: boolean;
-  scheduledStart?: string;
-  raw: unknown;
+export type ProvenanceKind = 'like' | 'subscription_upload' | 'playlist';
+
+export interface VideoProvenance {
+  video_id: string;
+  source_kind: ProvenanceKind;
+  source_ref: string;
+  imported_at: string;
+  signal_weight: number;
 }
 
-export interface Fetcher {
-  sourceId: string;
-  fetch(): Promise<NormalizedVideo[]>;
+export type IssueStatus = 'draft' | 'published';
+
+export interface Issue {
+  id: number;
+  status: IssueStatus;
+  title: string | null;
+  created_at: string;
+  published_at: string | null;
+}
+
+export type SlotKind = 'cover' | 'featured' | 'brief';
+
+export interface IssueSlot {
+  issue_id: number;
+  slot_kind: SlotKind;
+  slot_index: number;
+  video_id: string;
+  assigned_at: string;
+}
+
+export type ImportStatus = 'running' | 'ok' | 'error';
+
+export interface ImportLog {
+  id: number;
+  kind: ProvenanceKind;
+  source_ref: string | null;
+  started_at: string;
+  finished_at: string | null;
+  status: ImportStatus;
+  videos_new: number;
+  videos_updated: number;
+  channels_new: number;
+  error: string | null;
 }

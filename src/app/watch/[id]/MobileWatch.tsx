@@ -4,9 +4,11 @@ import { Kicker } from '../../../components/ui/Kicker';
 import { Rule } from '../../../components/ui/Rule';
 import { SectionChip } from '../../../components/SectionChip';
 import { ConsumptionAction } from '../../../components/ConsumptionAction';
-import type { IssueVideo } from '../../../lib/issue';
 import type { Section } from '../../../lib/types';
-import type { VideoWithConsumption } from '../../../lib/consumption';
+import type {
+  VideoWithConsumption,
+  VideoWithSection,
+} from '../../../lib/consumption';
 import { formatDuration, relativeTime } from '../../../lib/time';
 
 interface Props {
@@ -16,7 +18,7 @@ interface Props {
   sections: Section[];
   nextId: string | null;
   prevId: string | null;
-  nextInSection: IssueVideo[];
+  nextInSection: VideoWithSection[];
 }
 
 export function MobileWatch({
