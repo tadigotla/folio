@@ -1,65 +1,153 @@
-import Image from "next/image";
+import { getDb } from '../lib/db';
+import { getLiveNowVideos } from '../lib/consumption';
+import {
+  effectiveCoverId,
+  getOrPublishTodaysIssue,
+  loadIssueVideos,
+  pickBriefs,
+} from '../lib/issue';
+import { TopNav } from '../components/issue/TopNav';
+import { Masthead } from '../components/issue/Masthead';
+import { Cover } from '../components/issue/Cover';
+import { Featured } from '../components/issue/Featured';
+import {
+  Departments,
+  type DepartmentRow,
+} from '../components/issue/Departments';
+import { Briefs } from '../components/issue/Briefs';
+import { TagsStrip, type TagRow } from '../components/issue/TagsStrip';
+import { Rule } from '../components/ui/Rule';
+import { listTags, getTagCounts } from '../lib/tags';
+
+export const dynamic = 'force-dynamic';
+
+function loadDepartments(): DepartmentRow[] {
+  const db = getDb();
+  const sectionRows = db
+    .prepare(
+      `SELECT s.id, s.name,
+              COALESCE(
+                (SELECT COUNT(*)
+                   FROM videos v
+                   JOIN consumption c ON c.video_id = v.id
+                   JOIN channels ch   ON ch.id      = v.channel_id
+                  WHERE ch.section_id = s.id AND c.status = 'inbox'), 0)
+                AS inbox_count
+         FROM sections s
+        ORDER BY s.sort_order ASC, s.name ASC`,
+    )
+    .all() as Array<{ id: number; name: string; inbox_count: number }>;
+
+  const unsorted = db
+    .prepare(
+      `SELECT COUNT(*) AS n
+         FROM videos v
+         JOIN consumption c ON c.video_id = v.id
+         JOIN channels ch   ON ch.id      = v.channel_id
+        WHERE ch.section_id IS NULL AND c.status = 'inbox'`,
+    )
+    .get() as { n: number };
+
+  const sorted = [...sectionRows]
+    .sort((a, b) => b.inbox_count - a.inbox_count)
+    .slice(0, 6);
+
+  const rows: DepartmentRow[] = sorted.map((r) => {
+    const channels = db
+      .prepare(
+        `SELECT ch.name
+           FROM channels ch
+          WHERE ch.section_id = ?
+          ORDER BY ch.last_checked_at DESC
+          LIMIT 3`,
+      )
+      .all(r.id) as Array<{ name: string }>;
+    return {
+      id: r.id,
+      name: r.name,
+      inboxCount: r.inbox_count,
+      topChannels: channels.map((c) => c.name),
+    };
+  });
+
+  if (unsorted.n > 0) {
+    rows.push({
+      id: null,
+      name: 'Unsorted',
+      inboxCount: unsorted.n,
+      topChannels: [],
+    });
+  }
+
+  return rows;
+}
 
 export default function Home() {
+  const issue = getOrPublishTodaysIssue();
+  const liveNow = getLiveNowVideos();
+  const coverId = effectiveCoverId(issue);
+  const featuredIds = issue.featured_video_ids;
+  const usedIds = new Set<string>();
+  if (coverId) usedIds.add(coverId);
+  for (const id of featuredIds) usedIds.add(id);
+
+  const briefIds = pickBriefs(usedIds, 10);
+  const allIds = [
+    ...(coverId ? [coverId] : []),
+    ...featuredIds,
+    ...briefIds,
+  ];
+  const videoMap = loadIssueVideos(allIds);
+
+  const cover = coverId ? videoMap.get(coverId) ?? null : null;
+  const featured = featuredIds
+    .map((id) => videoMap.get(id))
+    .filter((v): v is NonNullable<typeof v> => !!v);
+  const briefs = briefIds
+    .map((id) => videoMap.get(id))
+    .filter((v): v is NonNullable<typeof v> => !!v);
+
+  const departments = loadDepartments();
+  const pinned = !!(issue.pinned_cover_video_id && coverId === issue.pinned_cover_video_id);
+
+  const tagCounts = getTagCounts();
+  const tagRows: TagRow[] = listTags()
+    .map((t) => ({ id: t.id, name: t.name, inboxCount: tagCounts.get(t.id) ?? 0 }))
+    .filter((r) => r.inboxCount > 0)
+    .sort((a, b) => b.inboxCount - a.inboxCount);
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
+    <div className="mx-auto w-full max-w-5xl px-6 pb-16">
+      <div className="pt-6">
+        <TopNav />
+      </div>
+      <Masthead
+        issueNumber={issue.id}
+        issueDate={issue.created_at}
+        liveVideos={liveNow}
+      />
+      <Rule thick className="mt-6" />
+      <Cover cover={cover} pinned={pinned} />
+      {cover && (
+        <>
+          <Rule thick />
+          <Featured videos={featured} />
+        </>
+      )}
+      <Rule thick />
+      <Departments rows={departments} />
+      {tagRows.length > 0 && (
+        <>
+          <Rule thick />
+          <TagsStrip rows={tagRows} />
+        </>
+      )}
+      {briefs.length > 0 && (
+        <>
+          <Rule thick />
+          <Briefs videos={briefs} />
+        </>
+      )}
     </div>
   );
 }
