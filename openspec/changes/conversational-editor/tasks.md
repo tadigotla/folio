@@ -4,7 +4,7 @@ This is a holding change. Concrete tasks live in the phase-specific sub-changes:
 
 - [x] Phase 1 — `taste-substrate` (archived 2026-04-22)
 - [x] Phase 2 — `taste-lab` (archived 2026-04-22)
-- [ ] Phase 3 — `conversational-editor-ui` (not yet proposed)
+- [x] Phase 3 — `conversational-editor-ui` (archived 2026-04-22)
 - [ ] Phase 4 — `overnight-brief` (not yet proposed)
 - [ ] Phase 5 — `discovery-tools` (not yet proposed)
 
