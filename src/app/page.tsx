@@ -13,6 +13,7 @@ import { Kicker } from '../components/ui/Kicker';
 import { Rule } from '../components/ui/Rule';
 import { EditorWorkspace } from '../components/workspace/EditorWorkspace';
 import { NewDraftButton } from '../components/workspace/NewDraftButton';
+import { ChatPanel } from '../components/agent/ChatPanel';
 
 export const dynamic = 'force-dynamic';
 
@@ -154,12 +155,17 @@ function WorkspaceBranch({
   const pool = getInboxPool(draft.id);
 
   return (
-    <div className="mt-8">
-      <EditorWorkspace
-        initialIssue={draft}
-        initialSlots={slots}
-        initialPool={pool}
-      />
+    <div className="mt-8 grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
+      <div>
+        <EditorWorkspace
+          initialIssue={draft}
+          initialSlots={slots}
+          initialPool={pool}
+        />
+      </div>
+      <div className="xl:sticky xl:top-6 xl:h-[calc(100vh-3rem)]">
+        <ChatPanel issueId={draft.id} />
+      </div>
     </div>
   );
 }

@@ -23,6 +23,7 @@ const GROUPS: Group[] = [
       { keys: ['/'], help: 'Focus pool search' },
       { keys: ['Delete'], help: 'Clear focused slot' },
       { keys: ['n'], help: 'New draft (when none exists)' },
+      { keys: ['⌘', 'K'], help: 'Focus editor-agent composer' },
     ],
   },
   {

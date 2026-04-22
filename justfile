@@ -60,6 +60,15 @@ youtube-auth:
     @echo "Start \`just dev\`, then open:"
     @echo "  http://localhost:6060/api/youtube/oauth/authorize"
 
+# Build the full taste substrate: transcripts → enrichment → embeddings → clusters.
+# Each step is incremental. See RUNBOOK "Taste substrate" for setup.
+taste-build:
+    npx tsx scripts/taste/build-all.ts
+
+# Re-run just the clustering step (cheap). Useful after importing new likes.
+taste-cluster:
+    npx tsx scripts/taste/cluster.ts
+
 # Trigger a YouTube import via the running dev server.
 # KIND is one of: likes | subscriptions | playlist
 # For KIND=playlist, also pass ID=<playlist_id>

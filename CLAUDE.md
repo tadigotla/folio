@@ -60,6 +60,70 @@ Taxonomy is two-layered: **sections** (1:1 channel→section, structural backbon
 
 The home page is a **today's issue** view backed by the `issues` table (migration `008_magazine.sql`). `getOrPublishTodaysIssue()` renders the latest issue if its `created_at` is today in America/New_York; otherwise it inserts a new row by running the composition rules. Composition: `composeIssue()` picks `cover_video_id` (affinity × recency × depth score over the inbox — see `scoreVideoForCover`), then `pickFeatured` picks one video per top-3 section (fallback: global top-3), and `pickBriefs` returns the 10 shortest inbox videos excluding cover + featured. `setCoverPin` writes `pinned_cover_video_id` on the latest issue; `effectiveCoverId` returns the pinned video if it's still inbox-valid, otherwise the deterministic cover. Explicit publish comes through `POST /api/issues/publish` (`↻ Publish new` button in the masthead). The `sections` table + `channels.section_id` drive the `/section/[slug]` department pages and the SectionChip assignment UI.
 
+### Taste substrate (`src/lib/embeddings.ts`, `enrichment.ts`, `taste.ts`, `transcripts.ts`)
+
+Phase-1 data plane for the conversational-editor umbrella. Five additive tables
+(`video_embeddings`, `video_enrichment`, `video_transcripts`, `taste_clusters`,
+`video_cluster_assignments`) built by `scripts/taste/*` scripts invoked via
+`just taste-build` / `just taste-cluster`. Embeddings default to OpenAI
+(`text-embedding-3-small`); enrichment runs locally through Ollama (cheap bulk
+work stays on-machine). Clustering runs on the like-set only, then every corpus
+video is assigned to its nearest active cluster by cosine — below the fuzzy
+floor (default 0.65) the assignment is flagged `is_fuzzy=1`. Cluster IDs are
+preserved across rebuilds via centroid matching so user-assigned labels survive
+re-import. See `RUNBOOK.md` § "Taste substrate" for setup and operational notes.
+
+### Taste lab (`src/lib/taste-edit.ts`, `taste-read.ts`, `src/app/taste/`)
+
+Phase-2 surface for the conversational-editor umbrella: human-in-the-loop
+editing of the cluster map. `/taste` lists active clusters with inline label
++ weight edits and a drift indicator; `/taste/[clusterId]` shows the full
+member list with reassign + Merge/Split/Retire actions. **`src/lib/taste-edit.ts`
+is the only legal mutation path** — every edit (label, weight, reassign, merge,
+split, retire) flows through it, runs inside a `db.transaction(...)`, and
+enforces `IllegalEditError` (HTTP 422) and `ConcurrentEditError` (HTTP 409,
+optimistic-lock on `taste_clusters.updated_at`). API routes under
+`src/app/api/taste/` are thin error-mappers over that module. The read layer
+(`taste-read.ts`) is read-only and powers both pages. Vector helpers in
+`src/lib/taste.ts` (`runKmeans`, `silhouetteScore`, `meanCentroid`,
+`cosineSim`, `centroidToBlob`) are exported and shared with phase-1's
+clustering so they have one notion of "centroid". The `weight` column is
+written here but not yet read by any code path — it lands as input to the
+editor agent in phase 3. See `RUNBOOK.md` § "Taste lab" for editing rules
+and rebuild interaction.
+
+### Editor agent (`src/lib/agent/`, `src/components/agent/`, `src/app/api/agent/`)
+
+Phase-3 surface for the conversational-editor umbrella: a Claude-driven
+chat panel bound to the current draft issue. The panel co-lives with the
+slot board on `/` (two columns at `xl:`, stacked below, hidden on mobile)
+and writes to `issue_slots` through the same library helpers (`assignSlot`,
+`swapSlots`, `clearSlot` in `src/lib/issues.ts`) that the drag board uses —
+slot rows are indistinguishable between the two sources.
+
+**`src/lib/agent/run.ts` is the only place the agentic loop runs.** It
+drives the multi-turn tool loop server-side, persists every turn (user,
+assistant, tool) to `conversation_turns`, and yields framing events
+(`delta`, `tool_call`, `tool_result`, `error`, `done`) to its caller. The
+API route `POST /api/agent/message` is a thin SSE adapter over it. No
+client-side tool dispatch.
+
+Seven tools total (`src/lib/agent/tools.ts`): `search_pool`,
+`rank_by_theme`, `get_video_detail`, `get_taste_clusters` (read-only over
+the taste substrate), `assign_slot`, `swap_slots`, `clear_slot`. The agent
+has no write access to taste tables — cluster edits remain exclusively on
+`/taste`. Tool failures surface as `tool_result` blocks (normal loop
+input), not SSE `error` events; `error` is reserved for model/API faults
+and the `AGENT_MAX_TURNS` cap.
+
+Conversations are 1:1 with draft issues and cascade-delete with them
+(migration `013_conversational_editor.sql`). Publishing the draft freezes
+the conversation — `appendTurn` rechecks the issue status inside its
+transaction. Without `ANTHROPIC_API_KEY`, `/api/agent/status` returns
+`{ apiKeyPresent: false }` and the panel renders a disabled card; the
+board remains fully functional. See `RUNBOOK.md` § "Editor agent" for
+setup, cost expectations, and privacy posture.
+
 ### Time handling (`src/lib/time.ts`)
 
 All timestamps are stored as UTC ISO 8601. Display is `America/New_York` (Tampa). **Every date conversion goes through this module** — use `toLocal`, `toLocalDateTime`, `relativeTime`, `formatDuration`, and do not call `date-fns-tz` directly elsewhere.
