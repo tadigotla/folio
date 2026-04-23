@@ -98,8 +98,8 @@ function upsertChannel(v: NormalizedYouTubeVideo): UpsertChannelResult {
   }
 
   db.prepare(
-    `INSERT INTO channels (id, name, handle, subscribed, first_seen_at, last_checked_at, section_id)
-     VALUES (?, ?, NULL, 0, ?, ?, NULL)`,
+    `INSERT INTO channels (id, name, handle, subscribed, first_seen_at, last_checked_at)
+     VALUES (?, ?, NULL, 0, ?, ?)`,
   ).run(v.channelId, v.channelName || '', now, now);
   return { inserted: true };
 }

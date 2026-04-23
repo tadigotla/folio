@@ -1,14 +1,13 @@
 import Link from 'next/link';
 import { Kicker } from '../ui/Kicker';
 import { formatDuration } from '../../lib/time';
-import type { VideoWithSection } from '../../lib/consumption';
+import type { VideoWithConsumption } from '../../lib/consumption';
 
 interface Props {
-  sectionName: string | null;
-  nextInSection: VideoWithSection[];
+  next: VideoWithConsumption[];
 }
 
-function Row({ v }: { v: VideoWithSection }) {
+function Row({ v }: { v: VideoWithConsumption }) {
   const duration = formatDuration(v.duration_seconds);
   return (
     <li className="border-b" style={{ borderColor: 'var(--color-rule)' }}>
@@ -16,9 +15,6 @@ function Row({ v }: { v: VideoWithSection }) {
         href={`/watch/${encodeURIComponent(v.id)}`}
         className="group flex items-baseline gap-3 py-2"
       >
-        <span className="shrink-0 font-sans text-[10px] font-semibold uppercase tracking-[0.14em] text-oxblood">
-          {(v.section_name ?? 'UNSORTED').toUpperCase()}
-        </span>
         <span className="flex-1 truncate font-[var(--font-serif-body)] text-base group-hover:text-oxblood">
           {v.title}
         </span>
@@ -35,16 +31,15 @@ function Row({ v }: { v: VideoWithSection }) {
   );
 }
 
-export function NextPieceFooter({ sectionName, nextInSection }: Props) {
-  const sectionLabel = sectionName ? sectionName.toUpperCase() : 'UNSORTED';
+export function NextPieceFooter({ next }: Props) {
   return (
     <footer>
-      <Kicker withRule>Next in {sectionLabel}</Kicker>
-      {nextInSection.length === 0 ? (
-        <p className="mt-4 italic text-sage">Nothing else queued here.</p>
+      <Kicker withRule>Next up</Kicker>
+      {next.length === 0 ? (
+        <p className="mt-4 italic text-sage">Nothing else queued.</p>
       ) : (
         <ul className="mt-4">
-          {nextInSection.map((v) => (
+          {next.map((v) => (
             <Row key={v.id} v={v} />
           ))}
         </ul>

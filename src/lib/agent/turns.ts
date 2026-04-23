@@ -1,34 +1,24 @@
 import { getDb } from '../db';
-import { nowUTC } from '../time';
+import { nowUTC, todayLocal } from '../time';
 import type {
   Conversation,
   ConversationTurn,
-  Issue,
   TurnContentBlock,
   TurnRole,
 } from '../types';
 
-export class ConversationFrozenError extends Error {
-  issueId: number;
-  constructor(issueId: number) {
-    super(`Conversation for issue ${issueId} is frozen (issue is published)`);
-    this.name = 'ConversationFrozenError';
-    this.issueId = issueId;
-  }
-}
-
-export class IssueMissingError extends Error {
-  issueId: number;
-  constructor(issueId: number) {
-    super(`Issue ${issueId} does not exist`);
-    this.name = 'IssueMissingError';
-    this.issueId = issueId;
+export class InvalidScopeDateError extends Error {
+  scopeDate: string;
+  constructor(scopeDate: string) {
+    super(`Invalid scope_date: ${scopeDate}`);
+    this.name = 'InvalidScopeDateError';
+    this.scopeDate = scopeDate;
   }
 }
 
 interface ConversationRow {
   id: number;
-  issue_id: number;
+  scope_date: string;
   created_at: string;
 }
 
@@ -42,6 +32,14 @@ interface TurnRow {
   cache_read_input_tokens: number | null;
   cache_creation_input_tokens: number | null;
   created_at: string;
+}
+
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+export function isScopeDate(s: string): boolean {
+  if (!ISO_DATE_RE.test(s)) return false;
+  const d = new Date(`${s}T00:00:00Z`);
+  return !Number.isNaN(d.getTime());
 }
 
 function rowToTurn(row: TurnRow): ConversationTurn {
@@ -59,55 +57,61 @@ function rowToTurn(row: TurnRow): ConversationTurn {
 }
 
 /**
- * Ensures a conversation row exists for this draft issue and returns it.
- * Throws ConversationFrozenError if the issue is published, IssueMissingError
- * if the issue row is absent.
+ * Returns today's conversation row in America/New_York, creating it if missing.
  */
-export function getOrCreateConversation(issueId: number): Conversation {
-  const db = getDb();
-  const issue = db
-    .prepare('SELECT * FROM issues WHERE id = ?')
-    .get(issueId) as Issue | undefined;
-  if (!issue) throw new IssueMissingError(issueId);
-  if (issue.status === 'published') throw new ConversationFrozenError(issueId);
+export function getOrCreateConversationForToday(): Conversation {
+  return getOrCreateConversationForDate(todayLocal());
+}
 
+export function getOrCreateConversationForDate(scopeDate: string): Conversation {
+  if (!isScopeDate(scopeDate)) throw new InvalidScopeDateError(scopeDate);
+  const db = getDb();
   const existing = db
-    .prepare('SELECT * FROM conversations WHERE issue_id = ?')
-    .get(issueId) as ConversationRow | undefined;
+    .prepare('SELECT * FROM conversations WHERE scope_date = ?')
+    .get(scopeDate) as ConversationRow | undefined;
   if (existing) return existing;
 
   const ts = nowUTC();
   const info = db
-    .prepare('INSERT INTO conversations (issue_id, created_at) VALUES (?, ?)')
-    .run(issueId, ts);
+    .prepare(
+      'INSERT INTO conversations (scope_date, created_at) VALUES (?, ?)',
+    )
+    .run(scopeDate, ts);
   return {
     id: Number(info.lastInsertRowid),
-    issue_id: issueId,
+    scope_date: scopeDate,
     created_at: ts,
   };
 }
 
-export function getConversationByIssue(issueId: number): Conversation | null {
+export function getConversationByDate(scopeDate: string): Conversation | null {
+  if (!isScopeDate(scopeDate)) return null;
   const db = getDb();
   const row = db
-    .prepare('SELECT * FROM conversations WHERE issue_id = ?')
-    .get(issueId) as ConversationRow | undefined;
+    .prepare('SELECT * FROM conversations WHERE scope_date = ?')
+    .get(scopeDate) as ConversationRow | undefined;
   return row ?? null;
 }
 
-export function getConversationTurns(issueId: number): ConversationTurn[] {
-  const db = getDb();
-  const conv = db
-    .prepare('SELECT * FROM conversations WHERE issue_id = ?')
-    .get(issueId) as ConversationRow | undefined;
+export function getConversationTurnsForDate(
+  scopeDate: string,
+): ConversationTurn[] {
+  const conv = getConversationByDate(scopeDate);
   if (!conv) return [];
+  return getConversationTurnsByConversationId(conv.id);
+}
+
+export function getConversationTurnsByConversationId(
+  conversationId: number,
+): ConversationTurn[] {
+  const db = getDb();
   const rows = db
     .prepare(
       `SELECT * FROM conversation_turns
         WHERE conversation_id = ?
         ORDER BY id ASC`,
     )
-    .all(conv.id) as TurnRow[];
+    .all(conversationId) as TurnRow[];
   return rows.map(rowToTurn);
 }
 
@@ -119,8 +123,8 @@ export interface TurnUsage {
 }
 
 /**
- * Appends a turn to the conversation. Re-checks the issue status inside the
- * same transaction so a concurrent publish cannot slip a turn past the freeze.
+ * Appends a turn to the conversation. The conversation row is required to
+ * exist; per-day uniqueness is enforced by the schema's UNIQUE on scope_date.
  */
 export function appendTurn(
   conversationId: number,
@@ -134,13 +138,6 @@ export function appendTurn(
       .prepare('SELECT * FROM conversations WHERE id = ?')
       .get(conversationId) as ConversationRow | undefined;
     if (!conv) throw new Error(`conversation ${conversationId} missing`);
-    const issue = db
-      .prepare('SELECT status FROM issues WHERE id = ?')
-      .get(conv.issue_id) as { status: string } | undefined;
-    if (!issue) throw new IssueMissingError(conv.issue_id);
-    if (issue.status === 'published') {
-      throw new ConversationFrozenError(conv.issue_id);
-    }
 
     const ts = nowUTC();
     const info = db
@@ -176,12 +173,6 @@ export function appendTurn(
   })();
 }
 
-/**
- * Collapse a turn list into the SDK's `MessageParam[]` shape. Tool turns (role
- * = 'tool' in the DB) are emitted as `user` messages whose content is the
- * tool_result blocks — the Anthropic API convention for feeding tool output
- * back to the model.
- */
 export interface SdkMessage {
   role: 'user' | 'assistant';
   content: TurnContentBlock[];
@@ -195,17 +186,12 @@ export function turnsToMessages(turns: ConversationTurn[]): SdkMessage[] {
     } else if (t.role === 'assistant') {
       out.push({ role: 'assistant', content: t.content });
     } else {
-      // tool turn -> user message with tool_result blocks
       out.push({ role: 'user', content: t.content });
     }
   }
   return out;
 }
 
-/**
- * Client-shaped turn for the renderer. Separate from the DB row so the
- * renderer does not need to know about token columns or JSON serialization.
- */
 export interface RenderedTurn {
   id: number;
   role: TurnRole;

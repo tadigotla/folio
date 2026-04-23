@@ -2,7 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 
 export class AgentKeyMissingError extends Error {
   constructor() {
-    super('ANTHROPIC_API_KEY is not set. See RUNBOOK "Editor agent".');
+    super('ANTHROPIC_API_KEY is not set. See RUNBOOK "Curation agent".');
     this.name = 'AgentKeyMissingError';
   }
 }

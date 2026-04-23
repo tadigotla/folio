@@ -1,0 +1,176 @@
+{
+  "exported_at": "2026-04-23T19:32:54.515Z",
+  "source": "magazine-teardown",
+  "issues": [
+    {
+      "id": 3,
+      "status": "published",
+      "title": "Nice Music",
+      "created_at": "2026-04-21T22:17:12.537Z",
+      "published_at": "2026-04-21T22:19:37.328Z"
+    },
+    {
+      "id": 6,
+      "status": "published",
+      "title": "Take Two",
+      "created_at": "2026-04-22T21:18:37.185Z",
+      "published_at": "2026-04-22T21:51:52.564Z"
+    },
+    {
+      "id": 11,
+      "status": "published",
+      "title": null,
+      "created_at": "2026-04-23T00:20:49.636Z",
+      "published_at": "2026-04-23T00:20:49.642Z"
+    },
+    {
+      "id": 15,
+      "status": "published",
+      "title": null,
+      "created_at": "2026-04-23T00:20:52.436Z",
+      "published_at": "2026-04-23T00:20:52.443Z"
+    },
+    {
+      "id": 16,
+      "status": "published",
+      "title": null,
+      "created_at": "2026-04-23T00:20:53.264Z",
+      "published_at": "2026-04-23T00:20:53.270Z"
+    },
+    {
+      "id": 19,
+      "status": "published",
+      "title": null,
+      "created_at": "2026-04-23T00:20:54.169Z",
+      "published_at": "2026-04-23T00:20:54.176Z"
+    },
+    {
+      "id": 29,
+      "status": "published",
+      "title": null,
+      "created_at": "2026-04-23T11:26:36.808Z",
+      "published_at": "2026-04-23T11:26:36.817Z"
+    },
+    {
+      "id": 30,
+      "status": "published",
+      "title": null,
+      "created_at": "2026-04-23T11:26:37.660Z",
+      "published_at": "2026-04-23T11:26:37.666Z"
+    },
+    {
+      "id": 33,
+      "status": "published",
+      "title": null,
+      "created_at": "2026-04-23T11:26:38.626Z",
+      "published_at": "2026-04-23T11:26:38.633Z"
+    },
+    {
+      "id": 43,
+      "status": "published",
+      "title": null,
+      "created_at": "2026-04-23T11:34:16.150Z",
+      "published_at": "2026-04-23T11:34:16.157Z"
+    },
+    {
+      "id": 44,
+      "status": "published",
+      "title": null,
+      "created_at": "2026-04-23T11:34:17.016Z",
+      "published_at": "2026-04-23T11:34:17.022Z"
+    },
+    {
+      "id": 47,
+      "status": "published",
+      "title": null,
+      "created_at": "2026-04-23T11:34:17.949Z",
+      "published_at": "2026-04-23T11:34:17.955Z"
+    }
+  ],
+  "issue_slots": [
+    {
+      "issue_id": 3,
+      "slot_kind": "cover",
+      "slot_index": 0,
+      "video_id": "od5gvwQRl-Y",
+      "assigned_at": "2026-04-21T22:17:28.539Z"
+    },
+    {
+      "issue_id": 3,
+      "slot_kind": "featured",
+      "slot_index": 0,
+      "video_id": "ky9SatRoyCY",
+      "assigned_at": "2026-04-21T22:17:40.364Z"
+    },
+    {
+      "issue_id": 3,
+      "slot_kind": "featured",
+      "slot_index": 1,
+      "video_id": "ib3r6mPD3aY",
+      "assigned_at": "2026-04-21T22:18:08.969Z"
+    },
+    {
+      "issue_id": 3,
+      "slot_kind": "featured",
+      "slot_index": 2,
+      "video_id": "QEqFEQqf8BI",
+      "assigned_at": "2026-04-21T22:18:25.245Z"
+    },
+    {
+      "issue_id": 3,
+      "slot_kind": "brief",
+      "slot_index": 0,
+      "video_id": "C4dumlS4Fm8",
+      "assigned_at": "2026-04-21T22:19:13.715Z"
+    },
+    {
+      "issue_id": 3,
+      "slot_kind": "brief",
+      "slot_index": 1,
+      "video_id": "xuxK0eYxUNQ",
+      "assigned_at": "2026-04-21T22:19:20.363Z"
+    },
+    {
+      "issue_id": 6,
+      "slot_kind": "cover",
+      "slot_index": 0,
+      "video_id": "rHPOyS6mjwI",
+      "assigned_at": "2026-04-22T21:20:29.024Z"
+    },
+    {
+      "issue_id": 6,
+      "slot_kind": "featured",
+      "slot_index": 0,
+      "video_id": "rVFHuxTFpPE",
+      "assigned_at": "2026-04-22T21:20:29.024Z"
+    },
+    {
+      "issue_id": 6,
+      "slot_kind": "featured",
+      "slot_index": 1,
+      "video_id": "CkQtD-A5eAQ",
+      "assigned_at": "2026-04-22T21:20:29.024Z"
+    },
+    {
+      "issue_id": 6,
+      "slot_kind": "brief",
+      "slot_index": 0,
+      "video_id": "dP7UICeQ1Rk",
+      "assigned_at": "2026-04-22T21:51:08.835Z"
+    },
+    {
+      "issue_id": 6,
+      "slot_kind": "brief",
+      "slot_index": 1,
+      "video_id": "3pzZPcpnkMY",
+      "assigned_at": "2026-04-22T21:51:08.836Z"
+    },
+    {
+      "issue_id": 6,
+      "slot_kind": "brief",
+      "slot_index": 2,
+      "video_id": "fEE0lZnVj8U",
+      "assigned_at": "2026-04-22T21:51:08.837Z"
+    }
+  ]
+}

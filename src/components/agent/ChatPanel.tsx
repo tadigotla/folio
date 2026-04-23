@@ -9,7 +9,7 @@ import { AgentErrorBanner } from './AgentErrorBanner';
 import type { RenderedTurn, ToolTrace } from './types';
 
 interface Props {
-  issueId: number;
+  scopeDate: string;
 }
 
 interface StatusResponse {
@@ -36,7 +36,6 @@ function parseSSE(buffer: string): {
   events: { type: string; data: string }[];
   rest: string;
 } {
-  // Split on blank lines (event terminator).
   const events: { type: string; data: string }[] = [];
   const chunks = buffer.split('\n\n');
   const rest = chunks.pop() ?? '';
@@ -52,7 +51,7 @@ function parseSSE(buffer: string): {
   return { events, rest };
 }
 
-export function ChatPanel({ issueId }: Props) {
+export function ChatPanel({ scopeDate }: Props) {
   const router = useRouter();
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [turns, setTurns] = useState<RenderedTurn[]>([]);
@@ -62,12 +61,11 @@ export function ChatPanel({ issueId }: Props) {
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
-  // Hydrate: conversation + status, in parallel.
   useEffect(() => {
     let cancelled = false;
     async function load() {
       const [convRes, statusRes] = await Promise.all([
-        fetch(`/api/agent/conversation/${issueId}`),
+        fetch(`/api/agent/conversation/${scopeDate}`),
         fetch(`/api/agent/status`),
       ]);
       if (cancelled) return;
@@ -84,9 +82,8 @@ export function ChatPanel({ issueId }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [issueId]);
+  }, [scopeDate]);
 
-  // Keep pinned to bottom as content arrives.
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -99,7 +96,6 @@ export function ChatPanel({ issueId }: Props) {
     setComposer('');
     setError(null);
 
-    // Optimistically add the user turn.
     const pendingUserId = -Date.now();
     const userBlocks: TurnContentBlock[] = [{ type: 'text', text }];
     setTurns((prev) => [
@@ -124,7 +120,7 @@ export function ChatPanel({ issueId }: Props) {
       res = await fetch('/api/agent/message', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ issueId, content: text }),
+        body: JSON.stringify({ content: text }),
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'network error');
@@ -150,7 +146,7 @@ export function ChatPanel({ issueId }: Props) {
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-    let boardDirty = false;
+    let stateDirty = false;
     try {
       while (true) {
         const { value, done } = await reader.read();
@@ -173,12 +169,9 @@ export function ChatPanel({ issueId }: Props) {
     } finally {
       setPhase('idle');
       setLive(null);
-      // After a stream that mutated slots, refresh so the RSC board picks up
-      // the new state. Also refetch the conversation so persisted ids
-      // replace the optimistic bubble.
-      if (boardDirty) router.refresh();
+      if (stateDirty) router.refresh();
       try {
-        const r = await fetch(`/api/agent/conversation/${issueId}`);
+        const r = await fetch(`/api/agent/conversation/${scopeDate}`);
         if (r.ok) {
           const data = (await r.json()) as ConversationResponse;
           setTurns(data.turns);
@@ -219,7 +212,7 @@ export function ChatPanel({ issueId }: Props) {
           summary: string;
           invalidatesBoard: boolean;
         };
-        if (p.invalidatesBoard) boardDirty = true;
+        if (p.invalidatesBoard) stateDirty = true;
         setLive((prev) => {
           if (!prev) return prev;
           return {
@@ -231,34 +224,30 @@ export function ChatPanel({ issueId }: Props) {
             ),
           };
         });
-        // Refresh the board as soon as a mutating tool returns so the user
-        // sees slot changes before the whole turn finishes.
         if (p.invalidatesBoard) router.refresh();
       } else if (type === 'error' && payload && typeof payload === 'object') {
         const { message } = payload as { message: string };
         setError(message);
       }
-      // 'done' is a noop — the stream closes on its own.
     }
-  }, [composer, issueId, router]);
+  }, [composer, scopeDate, router]);
 
   if (status && !status.apiKeyPresent) {
     return (
       <aside className="flex h-full flex-col border border-rule bg-paper">
         <header className="border-b border-rule px-4 py-3">
           <div className="font-sans text-[10px] font-semibold uppercase tracking-[0.18em] text-oxblood">
-            Editor agent
+            Curation agent
           </div>
         </header>
         <div className="flex-1 space-y-3 p-4">
           <p className="font-[var(--font-serif-display)] text-xl italic leading-snug text-ink-soft">
-            Connect an Anthropic API key to enable the editor agent.
+            Connect an Anthropic API key to enable the curation agent.
           </p>
           <p className="font-sans text-xs text-ink-soft/80">
             Set <code className="bg-rule/60 px-1">ANTHROPIC_API_KEY</code> in{' '}
             <code className="bg-rule/60 px-1">.env</code> and restart the dev
-            server. See RUNBOOK → Editor agent. The slot board to the left
-            remains fully usable without a key.
+            server. See RUNBOOK → Curation agent.
           </p>
         </div>
       </aside>
@@ -271,11 +260,11 @@ export function ChatPanel({ issueId }: Props) {
     <aside className="flex h-full flex-col border border-rule bg-paper">
       <header className="flex items-baseline justify-between gap-3 border-b border-rule px-4 py-3">
         <div className="font-sans text-[10px] font-semibold uppercase tracking-[0.18em] text-oxblood">
-          Editor agent
+          Curation agent
         </div>
         {status && (
           <div className="font-sans text-[10px] italic text-ink-soft">
-            {status.model}
+            {status.model} · {scopeDate}
           </div>
         )}
       </header>
@@ -297,8 +286,6 @@ export function ChatPanel({ issueId }: Props) {
         )}
         {turns.map((t, i) => {
           if (t.role === 'tool') return null;
-          // Attach the immediately-preceding tool turn(s)'s trace data to
-          // this assistant turn when we re-render persisted history.
           let traces: ToolTrace[] | undefined;
           if (t.role === 'assistant') {
             traces = collectTracesFor(t, turns.slice(i + 1));
@@ -330,11 +317,6 @@ export function ChatPanel({ issueId }: Props) {
   );
 }
 
-/**
- * Given a persisted assistant turn and the turns that follow, pull its
- * tool_use blocks paired with tool_result blocks from the next tool turn
- * (if any) so the rendered trace carries the result, not just the call.
- */
 function collectTracesFor(
   assistant: RenderedTurn,
   following: RenderedTurn[],

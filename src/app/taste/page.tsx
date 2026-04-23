@@ -1,5 +1,5 @@
 import Link from 'next/link';
-import { TopNav } from '../../components/issue/TopNav';
+import { TopNav } from '../../components/TopNav';
 import { Kicker } from '../../components/ui/Kicker';
 import { Rule } from '../../components/ui/Rule';
 import { ClusterCard } from '../../components/taste/ClusterCard';
@@ -7,12 +7,14 @@ import {
   getClusterSummaries,
   getClusterDrift,
 } from '../../lib/taste-read';
+import { getMutedClusterIdsToday } from '../../lib/mutes';
 
 export const dynamic = 'force-dynamic';
 
 export default function TastePage() {
   const { active, empty, retired } = getClusterSummaries();
   const drift = getClusterDrift();
+  const mutedIds = getMutedClusterIdsToday();
 
   return (
     <div className="mx-auto w-full max-w-5xl px-6 pb-16">
@@ -66,7 +68,11 @@ export default function TastePage() {
       ) : (
         <section className="space-y-4">
           {active.map((c) => (
-            <ClusterCard key={c.id} cluster={c} />
+            <ClusterCard
+              key={c.id}
+              cluster={c}
+              mutedToday={mutedIds.has(c.id)}
+            />
           ))}
         </section>
       )}
@@ -78,7 +84,11 @@ export default function TastePage() {
           </summary>
           <div className="mt-4 space-y-4">
             {empty.map((c) => (
-              <ClusterCard key={c.id} cluster={c} />
+              <ClusterCard
+                key={c.id}
+                cluster={c}
+                mutedToday={mutedIds.has(c.id)}
+              />
             ))}
           </div>
         </details>

@@ -2,14 +2,16 @@ import Link from 'next/link';
 import { DuotoneThumbnail } from '../DuotoneThumbnail';
 import { ClusterLabelInput } from './ClusterLabelInput';
 import { WeightSlider } from './WeightSlider';
+import { MuteTodayButton } from './MuteTodayButton';
 import type { ClusterSummary } from '../../lib/taste-read';
 
 interface Props {
   cluster: ClusterSummary;
   editable?: boolean;
+  mutedToday?: boolean;
 }
 
-export function ClusterCard({ cluster, editable = true }: Props) {
+export function ClusterCard({ cluster, editable = true, mutedToday = false }: Props) {
   const isRetired = cluster.retiredAt !== null;
   const sizeNote = `${cluster.memberCount} ${cluster.memberCount === 1 ? 'member' : 'members'}`;
   const fuzzyNote =
@@ -44,11 +46,15 @@ export function ClusterCard({ cluster, editable = true }: Props) {
           </p>
         </div>
         {editable && !isRetired && (
-          <div className="shrink-0">
+          <div className="flex shrink-0 flex-col items-end gap-2">
             <WeightSlider
               clusterId={cluster.id}
               initialWeight={cluster.weight}
               expectedUpdatedAt={cluster.updatedAt}
+            />
+            <MuteTodayButton
+              clusterId={cluster.id}
+              initiallyMuted={mutedToday}
             />
           </div>
         )}

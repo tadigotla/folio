@@ -1,8 +1,9 @@
 import type { ReactNode } from 'react';
 import { getLibraryVideos, type VideoWithConsumption } from '../../lib/consumption';
+import { getPlaylistsForVideos, type PlaylistMembership } from '../../lib/playlists';
 import { LibraryCard } from '../../components/LibraryCard';
 import { ConsumptionAction } from '../../components/ConsumptionAction';
-import { TopNav } from '../../components/issue/TopNav';
+import { TopNav } from '../../components/TopNav';
 import { Kicker } from '../../components/ui/Kicker';
 import { Rule } from '../../components/ui/Rule';
 
@@ -14,12 +15,14 @@ function Section({
   empty,
   videos,
   renderAction,
+  playlistsByVideo,
 }: {
   id: string;
   title: string;
   empty: string;
   videos: VideoWithConsumption[];
   renderAction?: (video: VideoWithConsumption) => ReactNode;
+  playlistsByVideo: Map<string, PlaylistMembership[]>;
 }) {
   return (
     <section id={id} className="py-10 scroll-mt-6">
@@ -33,6 +36,7 @@ function Section({
               key={video.id}
               video={video}
               action={renderAction ? renderAction(video) : undefined}
+              playlists={playlistsByVideo.get(video.id) ?? []}
             />
           ))}
         </div>
@@ -43,6 +47,12 @@ function Section({
 
 export default function LibraryPage() {
   const { saved, inProgress, archived } = getLibraryVideos();
+  const allIds = [
+    ...saved.map((v) => v.id),
+    ...inProgress.map((v) => v.id),
+    ...archived.map((v) => v.id),
+  ];
+  const playlistsByVideo = getPlaylistsForVideos(allIds);
 
   return (
     <div className="mx-auto w-full max-w-5xl px-6 pb-16">
@@ -66,6 +76,7 @@ export default function LibraryPage() {
         title="Saved"
         empty="Nothing saved yet. Head to the Inbox to triage new arrivals."
         videos={saved}
+        playlistsByVideo={playlistsByVideo}
         renderAction={(v) => (
           <ConsumptionAction
             videoId={v.id}
@@ -83,6 +94,7 @@ export default function LibraryPage() {
         title="In Progress"
         empty="Nothing in progress. Start a video from the Inbox or Saved to see it here."
         videos={inProgress}
+        playlistsByVideo={playlistsByVideo}
         renderAction={(v) => (
           <ConsumptionAction
             videoId={v.id}
@@ -100,6 +112,7 @@ export default function LibraryPage() {
         title="Archived"
         empty="Nothing archived yet."
         videos={archived}
+        playlistsByVideo={playlistsByVideo}
         renderAction={(v) => (
           <ConsumptionAction
             videoId={v.id}

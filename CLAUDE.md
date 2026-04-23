@@ -17,15 +17,19 @@ There is no test runner configured. Do not add one unless asked.
 
 ## Architecture
 
-**Folio** — a personal, magazine-shaped YouTube reading experience. The app
-ingests YouTube RSS feeds into a local SQLite DB, lets the user triage new
-arrivals in an Inbox, save keepers to a Library, and play them back via the
-official YouTube iframe embed. An older live-events framing
+**Folio** — a personal, taste-aware consumption room for the user's YouTube
+library. OAuth-imported videos land in an Inbox, get triaged into Saved /
+In-Progress / Archived, and surface back on `/` through taste-cluster-weighted
+rails (Right Now / Continue / Shelf). The earlier live-events framing
 (`events`, `status = scheduled|live|ended`, category filters, Lucky Pick,
 watched history) was removed during the video-library pivot — see
 `openspec/changes/archive/2026-04-21-rename-to-videos/` for the rationale.
-The original design brief at `docs/original-proposal.md` is outdated and
-retained only as historical context.
+The magazine framing (issues, slot board, sections, masthead) and its
+companion editor agent were removed by the `magazine-teardown` change on
+2026-04-23; what survives is the consumption substrate plus a per-day
+curation companion at `/chat`. The original design brief at
+`docs/original-proposal.md` is outdated and retained only as historical
+context.
 
 ### Ingestion pipeline (`src/fetchers/`)
 
@@ -54,15 +58,13 @@ retained only as historical context.
 - `recordProgress({ videoId, action, position? })` handles implicit playback signals (`start | tick | pause | end`). `start` auto-promotes `inbox → saved → in_progress` atomically, direct-edges `saved|archived → in_progress`, and no-ops on `dismissed` or `in_progress`. `end` auto-archives in-progress videos and clears `last_position_seconds`. `tick`/`pause` write the current position. The API route `src/app/api/consumption-progress/route.ts` accepts both `application/json` and `sendBeacon`-shaped bodies.
 - Helpers in the same file (`getInboxVideos`, `getLibraryVideos`, `getArchivedVideos`, `getLiveNowVideos`, `getVideoById`, `getConsumptionCounts`) are the canonical JOINs that RSC pages use.
 
-### Magazine issue lifecycle (`src/lib/issue.ts`, `src/app/page.tsx`)
+### Taxonomy (`src/lib/tags.ts`)
 
-Taxonomy is two-layered: **sections** (1:1 channel→section, structural backbone used by home-page composition + `/section/[slug]`) and **tags** (many-to-many via `channel_tags`, additive slicing only — powers `/tag/[slug]` and the Tags strip on `/`, but does NOT participate in issue composition). Manage both on `/sections`.
-
-The home page is a **today's issue** view backed by the `issues` table (migration `008_magazine.sql`). `getOrPublishTodaysIssue()` renders the latest issue if its `created_at` is today in America/New_York; otherwise it inserts a new row by running the composition rules. Composition: `composeIssue()` picks `cover_video_id` (affinity × recency × depth score over the inbox — see `scoreVideoForCover`), then `pickFeatured` picks one video per top-3 section (fallback: global top-3), and `pickBriefs` returns the 10 shortest inbox videos excluding cover + featured. `setCoverPin` writes `pinned_cover_video_id` on the latest issue; `effectiveCoverId` returns the pinned video if it's still inbox-valid, otherwise the deterministic cover. Explicit publish comes through `POST /api/issues/publish` (`↻ Publish new` button in the masthead). The `sections` table + `channels.section_id` drive the `/section/[slug]` department pages and the SectionChip assignment UI.
+The remaining taxonomy is **tags** — many-to-many via `channel_tags`, additive slicing only. Powers `/tag/[slug]` and the Tags strip on `/`. Tags are managed inline on the relevant card via `TagsEditor`. The earlier `sections` capability (1:1 channel→section, the structural backbone for the magazine's department pages) was retired by `magazine-teardown`; `016_magazine_teardown.sql` migrated every `channels.section_id` link into a `channel_tags` row by name before dropping `sections` + the column.
 
 ### Taste substrate (`src/lib/embeddings.ts`, `enrichment.ts`, `taste.ts`, `transcripts.ts`)
 
-Phase-1 data plane for the conversational-editor umbrella. Five additive tables
+Five additive tables
 (`video_embeddings`, `video_enrichment`, `video_transcripts`, `taste_clusters`,
 `video_cluster_assignments`) built by `scripts/taste/*` scripts invoked via
 `just taste-build` / `just taste-cluster`. Embeddings default to OpenAI
@@ -75,54 +77,77 @@ re-import. See `RUNBOOK.md` § "Taste substrate" for setup and operational notes
 
 ### Taste lab (`src/lib/taste-edit.ts`, `taste-read.ts`, `src/app/taste/`)
 
-Phase-2 surface for the conversational-editor umbrella: human-in-the-loop
-editing of the cluster map. `/taste` lists active clusters with inline label
-+ weight edits and a drift indicator; `/taste/[clusterId]` shows the full
-member list with reassign + Merge/Split/Retire actions. **`src/lib/taste-edit.ts`
-is the only legal mutation path** — every edit (label, weight, reassign, merge,
-split, retire) flows through it, runs inside a `db.transaction(...)`, and
-enforces `IllegalEditError` (HTTP 422) and `ConcurrentEditError` (HTTP 409,
-optimistic-lock on `taste_clusters.updated_at`). API routes under
-`src/app/api/taste/` are thin error-mappers over that module. The read layer
-(`taste-read.ts`) is read-only and powers both pages. Vector helpers in
-`src/lib/taste.ts` (`runKmeans`, `silhouetteScore`, `meanCentroid`,
-`cosineSim`, `centroidToBlob`) are exported and shared with phase-1's
-clustering so they have one notion of "centroid". The `weight` column is
-written here but not yet read by any code path — it lands as input to the
-editor agent in phase 3. See `RUNBOOK.md` § "Taste lab" for editing rules
-and rebuild interaction.
+Human-in-the-loop editing of the cluster map. `/taste` lists active clusters
+with inline label + weight edits and a drift indicator; `/taste/[clusterId]`
+shows the full member list with reassign + Merge/Split/Retire actions.
+**`src/lib/taste-edit.ts` is the only legal mutation path** — every edit
+(label, weight, reassign, merge, split, retire) flows through it, runs
+inside a `db.transaction(...)`, and enforces `IllegalEditError` (HTTP 422)
+and `ConcurrentEditError` (HTTP 409, optimistic-lock on
+`taste_clusters.updated_at`). API routes under `src/app/api/taste/` are thin
+error-mappers over that module. The read layer (`taste-read.ts`) is
+read-only and powers both pages. Vector helpers in `src/lib/taste.ts`
+(`runKmeans`, `silhouetteScore`, `meanCentroid`, `cosineSim`,
+`centroidToBlob`) are exported and shared with the clustering so they have
+one notion of "centroid". The `weight` column is read at home-ranking time
+and is also surfaced to the curation agent. See `RUNBOOK.md` § "Taste lab"
+for editing rules and rebuild interaction.
 
-### Editor agent (`src/lib/agent/`, `src/components/agent/`, `src/app/api/agent/`)
+### Home ranking (`src/lib/home-ranking.ts`, `src/lib/mutes.ts`, `src/components/home/`)
 
-Phase-3 surface for the conversational-editor umbrella: a Claude-driven
-chat panel bound to the current draft issue. The panel co-lives with the
-slot board on `/` (two columns at `xl:`, stacked below, hidden on mobile)
-and writes to `issue_slots` through the same library helpers (`assignSlot`,
-`swapSlots`, `clearSlot` in `src/lib/issues.ts`) that the drag board uses —
-slot rows are indistinguishable between the two sources.
+The first reader of `taste_clusters.weight`. `src/lib/home-ranking.ts` is
+the **single legal read path**: `rankForHome({ limit?, now? })` runs one
+SQL query joining `consumption`, `videos`, `video_cluster_assignments`,
+`taste_clusters`, and `taste_cluster_mutes`, filters the pool to
+`status IN ('inbox','saved','in_progress')`, and scores each candidate as
+`clusterWeight × freshness × stateBoost × fuzzyPenalty` (constants
+`HOME_RANKING_HALF_LIFE_DAYS = 14`, `FUZZY_PENALTY = 0.7`,
+`UNKNOWN_CLUSTER_WEIGHT = 0.5`, `UNKNOWN_FRESHNESS = 0.5`; no env
+overrides). Sort is score desc with `video_id` asc tie-break; default
+`limit = 20`. Clamps `taste_clusters.weight` to `[0, 2]` at read time;
+`taste-edit.ts` is unchanged. `src/lib/mutes.ts` is the only mutation
+path for the per-day mute toggle (`setMuteToday`, `isMutedToday`,
+`getMutedClusterIdsToday`) — transactions + typed `ClusterNotFoundError`
+(404). The rail component `RightNowRail` lives in `src/components/home/`
+and is rendered on `/` whenever a corpus is present (connected +
+`videos > 0`) — no feature flag. `/` owns the consumption-home rail stack
+(`RightNowRail` → `ContinueRail` → `ShelfRail` → entry-point footer).
+API routes `GET /api/home/ranking` (with `?debug=1` breakdown) and
+`POST /api/taste/clusters/[id]/mute-today` are thin wrappers. See
+`RUNBOOK.md` § "Home ranking rail".
+
+### Curation agent (`src/lib/agent/`, `src/components/agent/`, `src/app/api/agent/`, `src/app/chat/`)
+
+A Claude-driven curation companion bound to today's local-day. The
+`ChatPanel` lives at `/chat` and reads/writes `conversations` keyed by
+`scope_date` (one conversation per America/New_York day). The agent has
+no slot board, no draft issue, and no editor-in-chief framing; it helps
+the user navigate the pool, maintain playlists, and calibrate cluster
+signals.
 
 **`src/lib/agent/run.ts` is the only place the agentic loop runs.** It
-drives the multi-turn tool loop server-side, persists every turn (user,
-assistant, tool) to `conversation_turns`, and yields framing events
-(`delta`, `tool_call`, `tool_result`, `error`, `done`) to its caller. The
-API route `POST /api/agent/message` is a thin SSE adapter over it. No
-client-side tool dispatch.
+drives the multi-turn tool loop server-side, resolves today's `scope_date`
+itself, persists every turn (user, assistant, tool) to
+`conversation_turns`, and yields framing events (`delta`, `tool_call`,
+`tool_result`, `error`, `done`) to its caller. The API route
+`POST /api/agent/message` is a thin SSE adapter; the client never
+dispatches tools.
 
-Seven tools total (`src/lib/agent/tools.ts`): `search_pool`,
-`rank_by_theme`, `get_video_detail`, `get_taste_clusters` (read-only over
-the taste substrate), `assign_slot`, `swap_slots`, `clear_slot`. The agent
-has no write access to taste tables — cluster edits remain exclusively on
-`/taste`. Tool failures surface as `tool_result` blocks (normal loop
-input), not SSE `error` events; `error` is reserved for model/API faults
-and the `AGENT_MAX_TURNS` cap.
+Eleven tools total (`src/lib/agent/tools.ts`): `search_pool`,
+`rank_by_theme`, `get_video_detail`, `get_taste_clusters` (all read-only
+over the substrate), plus the consumption-side mutations
+`create_playlist`, `add_to_playlist`, `remove_from_playlist`,
+`reorder_playlist`, `triage_inbox`, `mute_cluster_today`, `resurface`.
+The agent has no write access to taste tables (cluster edits remain on
+`/taste`); the per-day mute is the one taste-side action. Tool failures
+surface as `tool_result` blocks (normal loop input), not SSE `error`
+events — `error` is reserved for model/API faults and the
+`AGENT_MAX_TURNS` cap.
 
-Conversations are 1:1 with draft issues and cascade-delete with them
-(migration `013_conversational_editor.sql`). Publishing the draft freezes
-the conversation — `appendTurn` rechecks the issue status inside its
-transaction. Without `ANTHROPIC_API_KEY`, `/api/agent/status` returns
-`{ apiKeyPresent: false }` and the panel renders a disabled card; the
-board remains fully functional. See `RUNBOOK.md` § "Editor agent" for
-setup, cost expectations, and privacy posture.
+Without `ANTHROPIC_API_KEY`, `/api/agent/status` returns
+`{ apiKeyPresent: false }` and `/chat` renders a disabled card; the rest
+of the app is unaffected. See `RUNBOOK.md` § "Curation agent" for setup,
+cost expectations, and privacy posture.
 
 ### Time handling (`src/lib/time.ts`)
 
@@ -131,12 +156,37 @@ All timestamps are stored as UTC ISO 8601. Display is `America/New_York` (Tampa)
 ### Web UI (`src/app/`, App Router)
 
 - Pages are React Server Components reading SQLite directly via the `consumption.ts` helpers (which wrap `getDb()`). There is no API layer between RSC pages and the DB.
-- Routes: `/` (nav hub + Live Now strip), `/inbox` (triage), `/library` (Saved / In Progress / Archived sections — In Progress cards render a thin progress bar when `last_position_seconds` and `duration_seconds` are both known), `/watch/[id]` (IFrame Player API embed + metadata).
+- Routes: `/` (consumption-home rail stack), `/inbox` (triage), `/library` (Saved / In Progress / Archived sections — In Progress cards render a thin progress bar when `last_position_seconds` and `duration_seconds` are both known), `/playlists`, `/playlists/[id]`, `/taste`, `/taste/[clusterId]`, `/tag/[slug]`, `/watch/[id]` (IFrame Player API embed + metadata), `/chat` (curation agent), `/settings/youtube`.
 - Mutation APIs:
   - `POST /api/consumption` `{ videoId, next }` — explicit user-initiated transitions (Save, Archive, Dismiss, Re-open).
   - `POST /api/consumption-progress` `{ videoId, action, position? }` — implicit playback signals emitted by the Player. Fire-and-forget from the client; accepts `sendBeacon`-style text bodies.
 - `src/components/` holds the client islands (`ConsumptionAction`, `Player`, `VideoCard`). `src/components/ui/` is shadcn-generated.
 - Player view (`src/app/watch/[id]/`) uses the YouTube IFrame Player API client-side — this app **never proxies or restreams** video. Non-YouTube stream kinds (Twitch, generic iframe, NASA, Explore.org) have been removed; the id column is the YouTube video ID and is used verbatim in the embed. The Player auto-seeks to `consumption.last_position_seconds` on load (silent — no resume UI), dispatches `start`/`pause`/`end` on `onStateChange` and a 30s `tick` while playing, and uses `navigator.sendBeacon` on `visibilitychange`/`pagehide`.
+
+### Playlists (`src/lib/playlists.ts`, `src/app/playlists/`, `src/app/api/playlists/`)
+
+Named, ordered, many-to-many collections of videos. Two tables
+(`playlists`, `playlist_items`) added by
+migration `014_playlists.sql`; both `ON DELETE CASCADE` from their parents
+so deleting a video or a playlist cleans up `playlist_items` automatically.
+**`src/lib/playlists.ts` is the only legal mutation path** — every write
+flows through `createPlaylist`, `renamePlaylist`, `deletePlaylist`,
+`addToPlaylist`, `removeFromPlaylist`, or `reorderPlaylist` inside a
+`db.transaction(...)`, and every mutation touches `playlists.updated_at`.
+Typed errors (`PlaylistNotFoundError`, `VideoNotFoundError`,
+`DuplicateVideoInPlaylistError`, `InvalidPositionError`) map to HTTP
+404/404/409/422 in the API routes under `src/app/api/playlists/**`. Read
+helpers `listPlaylists`, `getPlaylist`, `getPlaylistsForVideo`, and
+`getPlaylistsForVideos` (batch) power the RSC pages and the membership
+indicator on cards. The list page sorts by `updated_at DESC`; item
+positions are dense integers but reorders only renumber the affected
+range, so occasional gaps (after removals) are tolerated. `show_on_home`
+is persisted by `PATCH /api/playlists/[id]` and read by `ShelfRail` on
+`/`. The `<AddToPlaylistButton>`
+popover (`src/components/playlist/`) is wired into both `VideoCard` and
+`LibraryCard` via an optional `playlists` prop; consumers must
+batch-load with `getPlaylistsForVideos` to avoid N+1 queries (see
+`src/app/library/page.tsx`).
 
 ### Next.js version caveat
 

@@ -26,7 +26,7 @@ const plexMono = IBM_Plex_Mono({
 
 export const metadata: Metadata = {
   title: 'Folio',
-  description: 'A daily magazine for videos.',
+  description: 'A personal taste-aware consumption room for YouTube.',
 };
 
 export default function RootLayout({

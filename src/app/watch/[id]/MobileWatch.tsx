@@ -2,37 +2,20 @@ import Link from 'next/link';
 import { DuotoneThumbnail } from '../../../components/DuotoneThumbnail';
 import { Kicker } from '../../../components/ui/Kicker';
 import { Rule } from '../../../components/ui/Rule';
-import { SectionChip } from '../../../components/SectionChip';
 import { ConsumptionAction } from '../../../components/ConsumptionAction';
-import type { Section } from '../../../lib/types';
-import type {
-  VideoWithConsumption,
-  VideoWithSection,
-} from '../../../lib/consumption';
+import type { VideoWithConsumption } from '../../../lib/consumption';
 import { formatDuration, relativeTime } from '../../../lib/time';
 
 interface Props {
   video: VideoWithConsumption;
-  sectionId: number | null;
-  sectionName: string | null;
-  sections: Section[];
   nextId: string | null;
   prevId: string | null;
-  nextInSection: VideoWithSection[];
+  next: VideoWithConsumption[];
 }
 
-export function MobileWatch({
-  video,
-  sectionId,
-  sectionName,
-  sections,
-  nextId,
-  prevId,
-  nextInSection,
-}: Props) {
+export function MobileWatch({ video, nextId, prevId, next }: Props) {
   const duration = formatDuration(video.duration_seconds);
   const published = video.published_at ? relativeTime(video.published_at) : null;
-  const kickerLabel = sectionName ? sectionName.toUpperCase() : 'UNSORTED';
   const thumb =
     video.thumbnail_url ?? `https://i.ytimg.com/vi/${video.id}/maxresdefault.jpg`;
   const ytUrl = `https://www.youtube.com/watch?v=${encodeURIComponent(video.id)}`;
@@ -40,7 +23,7 @@ export function MobileWatch({
   return (
     <div className="mx-auto w-full max-w-xl px-4 pb-20">
       <header className="pt-5">
-        <Kicker>{kickerLabel}</Kicker>
+        <Kicker>Video</Kicker>
         <h1 className="mt-2 font-[var(--font-serif-display)] text-[28px] font-medium leading-tight tracking-tight">
           {video.title}
         </h1>
@@ -48,14 +31,6 @@ export function MobileWatch({
           {video.channel_name}
           {duration ? ` · ${duration}` : ''}
           {published ? ` · ${published}` : ''}
-        </div>
-        <div className="mt-2">
-          <SectionChip
-            channelId={video.channel_id}
-            currentSectionId={sectionId}
-            currentSectionName={sectionName}
-            sections={sections}
-          />
         </div>
       </header>
 
@@ -126,20 +101,18 @@ export function MobileWatch({
             href={`/watch/${encodeURIComponent(nextId)}`}
             className="font-sans text-[11px] font-semibold uppercase tracking-[0.16em] text-oxblood hover:text-ink"
           >
-            Next piece →
+            Next →
           </Link>
         ) : (
-          <span className="font-sans text-[11px] uppercase tracking-[0.16em] text-sage">
-            End of issue
-          </span>
+          <span />
         )}
       </div>
 
-      {nextInSection.length > 0 && (
+      {next.length > 0 && (
         <section className="mt-8">
-          <Kicker withRule>Next in {kickerLabel}</Kicker>
+          <Kicker withRule>Next up</Kicker>
           <ul className="mt-4">
-            {nextInSection.map((v) => {
+            {next.map((v) => {
               const d = formatDuration(v.duration_seconds);
               return (
                 <li

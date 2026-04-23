@@ -1,17 +1,5 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import { getDb } from '../db';
-import {
-  assignSlot,
-  swapSlots,
-  clearSlot,
-  type SwapFrom,
-  InvalidSlotError,
-  IssueFrozenError,
-  IssueNotFoundError,
-  SlotOccupiedError,
-  VideoAlreadyOnIssueError,
-  getInboxPool,
-} from '../issues';
 import { getClusterSummaries } from '../taste-read';
 import {
   bufferToFloats,
@@ -19,16 +7,34 @@ import {
   getActiveEmbeddingConfig,
 } from '../embeddings';
 import { cosineSim, normalize } from '../taste';
-import type { SlotKind } from '../types';
+import {
+  setConsumptionStatus,
+  IllegalTransitionError,
+} from '../consumption';
+import {
+  createPlaylist,
+  addToPlaylist,
+  removeFromPlaylist,
+  reorderPlaylist,
+  PlaylistNotFoundError,
+  VideoNotFoundError,
+  DuplicateVideoInPlaylistError,
+  InvalidPositionError,
+} from '../playlists';
+import { setMuteToday, ClusterNotFoundError } from '../mutes';
 
 export const TOOL_NAMES = [
   'search_pool',
   'rank_by_theme',
   'get_video_detail',
   'get_taste_clusters',
-  'assign_slot',
-  'swap_slots',
-  'clear_slot',
+  'create_playlist',
+  'add_to_playlist',
+  'remove_from_playlist',
+  'reorder_playlist',
+  'triage_inbox',
+  'mute_cluster_today',
+  'resurface',
 ] as const;
 
 export type ToolName = (typeof TOOL_NAMES)[number];
@@ -37,13 +43,13 @@ export const TOOL_DEFS: Anthropic.Tool[] = [
   {
     name: 'search_pool',
     description:
-      'Search the inbox pool (videos not yet placed on the current draft). Returns id, title, channel, duration, published date, and current cluster assignment. Supports a free-text substring on title/channel and/or a taste cluster filter.',
+      'Search the active pool (videos with consumption.status in inbox/saved/in_progress). Returns id, title, channel, duration, published date, status, and current cluster assignment. Supports a free-text substring on title/channel and/or a taste cluster filter.',
     input_schema: {
       type: 'object',
       properties: {
         query: {
           type: 'string',
-          description: 'Substring matched case-insensitively against title and channel name. Optional.',
+          description: 'Substring matched case-insensitively against title and channel. Optional.',
         },
         cluster_id: {
           type: 'integer',
@@ -61,7 +67,7 @@ export const TOOL_DEFS: Anthropic.Tool[] = [
   {
     name: 'rank_by_theme',
     description:
-      'Embed a free-text theme under the active embedding provider/model, then return the top-K corpus videos by cosine similarity. Use this to find "things that lean X" when the user describes a feeling rather than a keyword. Rejects with no_embedded_corpus if the active provider has no embeddings yet.',
+      'Embed a free-text theme under the active embedding provider/model, then return the top-K corpus videos by cosine similarity. Use this when the user describes a feeling rather than a keyword. Rejects with no_embedded_corpus if the active provider has no embeddings.',
     input_schema: {
       type: 'object',
       required: ['theme'],
@@ -79,7 +85,7 @@ export const TOOL_DEFS: Anthropic.Tool[] = [
   {
     name: 'get_video_detail',
     description:
-      'Fetch everything known about one video: title, channel, duration, published date, LLM summary, topic tags, first ~500 chars of the transcript, consumption status, and current cluster assignment.',
+      'Fetch everything known about one video: title, channel, duration, published date, summary, topic tags, first ~500 chars of the transcript, consumption status, and current cluster assignment.',
     input_schema: {
       type: 'object',
       required: ['video_id'],
@@ -93,71 +99,88 @@ export const TOOL_DEFS: Anthropic.Tool[] = [
     input_schema: { type: 'object', properties: {} },
   },
   {
-    name: 'assign_slot',
-    description:
-      'Place a video into an empty slot on the current draft. slot_kind is one of cover|featured|brief; cover has slot_index 0, featured 0..2, brief 0..9. Assigning an inbox video auto-promotes its consumption status to saved.',
+    name: 'create_playlist',
+    description: 'Create a new playlist with the given name and optional description.',
     input_schema: {
       type: 'object',
-      required: ['video_id', 'slot_kind', 'slot_index'],
+      required: ['name'],
+      properties: {
+        name: { type: 'string' },
+        description: { type: 'string' },
+      },
+    },
+  },
+  {
+    name: 'add_to_playlist',
+    description: 'Append a video to a playlist. Fails if the video is already a member.',
+    input_schema: {
+      type: 'object',
+      required: ['playlist_id', 'video_id'],
+      properties: {
+        playlist_id: { type: 'integer' },
+        video_id: { type: 'string' },
+      },
+    },
+  },
+  {
+    name: 'remove_from_playlist',
+    description: 'Remove a video from a playlist.',
+    input_schema: {
+      type: 'object',
+      required: ['playlist_id', 'video_id'],
+      properties: {
+        playlist_id: { type: 'integer' },
+        video_id: { type: 'string' },
+      },
+    },
+  },
+  {
+    name: 'reorder_playlist',
+    description: 'Move a playlist item to a new 1-based position.',
+    input_schema: {
+      type: 'object',
+      required: ['playlist_id', 'video_id', 'position'],
+      properties: {
+        playlist_id: { type: 'integer' },
+        video_id: { type: 'string' },
+        position: { type: 'integer', minimum: 1 },
+      },
+    },
+  },
+  {
+    name: 'triage_inbox',
+    description:
+      'Transition a video\'s consumption status: save (inbox→saved), archive (saved or in_progress→archived), or dismiss (inbox→dismissed).',
+    input_schema: {
+      type: 'object',
+      required: ['video_id', 'action'],
       properties: {
         video_id: { type: 'string' },
-        slot_kind: { type: 'string', enum: ['cover', 'featured', 'brief'] },
-        slot_index: { type: 'integer', minimum: 0, maximum: 9 },
+        action: { type: 'string', enum: ['save', 'archive', 'dismiss'] },
       },
     },
   },
   {
-    name: 'swap_slots',
+    name: 'mute_cluster_today',
     description:
-      'Swap the occupant of two slots, or replace a slot with a pool video. `from` is either { kind, index } for slot→slot or { pool: video_id } for pool→slot. The target slot must currently be occupied.',
+      'Toggle the per-day mute on a taste cluster — the home ranking will dampen that cluster for the rest of the local day. Calling twice in the same day un-mutes.',
     input_schema: {
       type: 'object',
-      required: ['from', 'to'],
-      properties: {
-        from: {
-          oneOf: [
-            {
-              type: 'object',
-              required: ['kind', 'index'],
-              properties: {
-                kind: { type: 'string', enum: ['cover', 'featured', 'brief'] },
-                index: { type: 'integer', minimum: 0, maximum: 9 },
-              },
-            },
-            {
-              type: 'object',
-              required: ['pool'],
-              properties: { pool: { type: 'string' } },
-            },
-          ],
-        },
-        to: {
-          type: 'object',
-          required: ['kind', 'index'],
-          properties: {
-            kind: { type: 'string', enum: ['cover', 'featured', 'brief'] },
-            index: { type: 'integer', minimum: 0, maximum: 9 },
-          },
-        },
-      },
+      required: ['cluster_id'],
+      properties: { cluster_id: { type: 'integer' } },
     },
   },
   {
-    name: 'clear_slot',
-    description: 'Empty one slot on the current draft.',
+    name: 'resurface',
+    description: 'Move an archived video back to saved.',
     input_schema: {
       type: 'object',
-      required: ['slot_kind', 'slot_index'],
-      properties: {
-        slot_kind: { type: 'string', enum: ['cover', 'featured', 'brief'] },
-        slot_index: { type: 'integer', minimum: 0, maximum: 9 },
-      },
+      required: ['video_id'],
+      properties: { video_id: { type: 'string' } },
     },
   },
 ];
 
-// Mark the last tool with cache_control so the tools block joins the cached
-// prefix along with the system prompt.
 export function getToolsForRequest(): Anthropic.Tool[] {
   const tools = TOOL_DEFS.map((t) => ({ ...t }));
   const last = tools[tools.length - 1];
@@ -167,19 +190,22 @@ export function getToolsForRequest(): Anthropic.Tool[] {
   return tools;
 }
 
-export interface ToolContext {
-  issueId: number;
-}
-
 export type ToolResult =
   | { ok: true; data: unknown; summary?: string }
   | { ok: false; error: string; summary?: string };
 
-const VALID_KINDS: SlotKind[] = ['cover', 'featured', 'brief'];
-
-function isSlotKind(v: unknown): v is SlotKind {
-  return typeof v === 'string' && VALID_KINDS.includes(v as SlotKind);
-}
+// Tools whose success should prompt the client to refresh consumption-affecting
+// surfaces (rails, library, playlists). Used by the SSE adapter to flag
+// `invalidatesBoard` for backwards compat with the existing client.
+export const STATE_MUTATION_TOOLS: ReadonlySet<ToolName> = new Set([
+  'create_playlist',
+  'add_to_playlist',
+  'remove_from_playlist',
+  'reorder_playlist',
+  'triage_inbox',
+  'mute_cluster_today',
+  'resurface',
+]);
 
 // --- search_pool ----------------------------------------------------------
 
@@ -205,7 +231,7 @@ function execSearchPool(args: {
   const clusterId = args.cluster_id;
 
   const params: unknown[] = [];
-  const where: string[] = [`c.status IN ('inbox','saved')`];
+  const where: string[] = [`c.status IN ('inbox','saved','in_progress')`];
 
   let sql = `SELECT v.id, v.title, ch.name AS channel_name,
                     v.duration_seconds, v.published_at,
@@ -427,117 +453,166 @@ function execGetTasteClusters(): ToolResult {
   };
 }
 
-// --- slot tools (reuse the library path) ----------------------------------
+// --- playlist tools -------------------------------------------------------
 
-function mapSlotErr(err: unknown): ToolResult {
-  if (err instanceof InvalidSlotError) {
-    return { ok: false, error: 'invalid_slot' };
+function mapPlaylistErr(err: unknown): ToolResult {
+  if (err instanceof PlaylistNotFoundError) {
+    return { ok: false, error: 'playlist_not_found' };
   }
-  if (err instanceof IssueFrozenError) {
-    return { ok: false, error: 'issue_frozen' };
+  if (err instanceof VideoNotFoundError) {
+    return { ok: false, error: 'video_not_found' };
   }
-  if (err instanceof IssueNotFoundError) {
-    return { ok: false, error: 'issue_not_found' };
+  if (err instanceof DuplicateVideoInPlaylistError) {
+    return { ok: false, error: 'duplicate_video' };
   }
-  if (err instanceof SlotOccupiedError) {
-    return { ok: false, error: 'slot_occupied' };
-  }
-  if (err instanceof VideoAlreadyOnIssueError) {
-    return { ok: false, error: 'video_already_on_issue' };
+  if (err instanceof InvalidPositionError) {
+    return { ok: false, error: 'invalid_position' };
   }
   return { ok: false, error: err instanceof Error ? err.message : String(err) };
 }
 
-function execAssignSlot(
-  ctx: ToolContext,
-  args: { video_id: string; slot_kind: SlotKind; slot_index: number },
-): ToolResult {
-  if (!isSlotKind(args.slot_kind)) {
-    return { ok: false, error: 'invalid_slot_kind' };
-  }
+function execCreatePlaylist(args: {
+  name: string;
+  description?: string;
+}): ToolResult {
   try {
-    assignSlot(ctx.issueId, args.video_id, args.slot_kind, args.slot_index);
+    const playlist = createPlaylist({
+      name: args.name,
+      description: args.description ?? null,
+    });
     return {
       ok: true,
-      data: { assigned: true },
-      summary: `assigned ${args.video_id} → ${args.slot_kind}[${args.slot_index}]`,
+      data: { playlist_id: playlist.id, name: playlist.name },
+      summary: `created playlist #${playlist.id} "${playlist.name}"`,
     };
   } catch (err) {
-    return mapSlotErr(err);
+    return mapPlaylistErr(err);
   }
 }
 
-interface SwapArgs {
-  from: { kind?: string; index?: number; pool?: string };
-  to: { kind: string; index: number };
-}
-
-function execSwapSlots(ctx: ToolContext, args: SwapArgs): ToolResult {
-  if (!isSlotKind(args.to.kind) || typeof args.to.index !== 'number') {
-    return { ok: false, error: 'invalid_slot' };
-  }
-  let from: SwapFrom;
-  if (typeof args.from.pool === 'string' && args.from.pool) {
-    from = { pool: args.from.pool };
-  } else if (
-    isSlotKind(args.from.kind) &&
-    typeof args.from.index === 'number'
-  ) {
-    from = { kind: args.from.kind, index: args.from.index };
-  } else {
-    return { ok: false, error: 'invalid_swap_from' };
-  }
+function execAddToPlaylist(args: {
+  playlist_id: number;
+  video_id: string;
+}): ToolResult {
   try {
-    swapSlots(ctx.issueId, from, { kind: args.to.kind, index: args.to.index });
+    const result = addToPlaylist(args.playlist_id, args.video_id);
     return {
       ok: true,
-      data: { swapped: true },
-      summary:
-        `swapped ${'pool' in from ? `pool:${from.pool}` : `${from.kind}[${from.index}]`} ↔ ${args.to.kind}[${args.to.index}]`,
+      data: { playlist_id: args.playlist_id, video_id: args.video_id, position: result.position },
+      summary: `added ${args.video_id} → playlist #${args.playlist_id} at position ${result.position}`,
     };
   } catch (err) {
-    return mapSlotErr(err);
+    return mapPlaylistErr(err);
   }
 }
 
-function execClearSlot(
-  ctx: ToolContext,
-  args: { slot_kind: SlotKind; slot_index: number },
-): ToolResult {
-  if (!isSlotKind(args.slot_kind)) {
-    return { ok: false, error: 'invalid_slot_kind' };
-  }
+function execRemoveFromPlaylist(args: {
+  playlist_id: number;
+  video_id: string;
+}): ToolResult {
   try {
-    clearSlot(ctx.issueId, args.slot_kind, args.slot_index);
+    removeFromPlaylist(args.playlist_id, args.video_id);
     return {
       ok: true,
-      data: { cleared: true },
-      summary: `cleared ${args.slot_kind}[${args.slot_index}]`,
+      data: { playlist_id: args.playlist_id, video_id: args.video_id },
+      summary: `removed ${args.video_id} from playlist #${args.playlist_id}`,
     };
   } catch (err) {
-    return mapSlotErr(err);
+    return mapPlaylistErr(err);
+  }
+}
+
+function execReorderPlaylist(args: {
+  playlist_id: number;
+  video_id: string;
+  position: number;
+}): ToolResult {
+  try {
+    const result = reorderPlaylist(args.playlist_id, args.video_id, args.position);
+    return {
+      ok: true,
+      data: { playlist_id: args.playlist_id, video_id: args.video_id, position: result.position },
+      summary: `moved ${args.video_id} → position ${result.position} in playlist #${args.playlist_id}`,
+    };
+  } catch (err) {
+    return mapPlaylistErr(err);
+  }
+}
+
+// --- triage_inbox / resurface ---------------------------------------------
+
+const TRIAGE_NEXT: Record<string, 'saved' | 'archived' | 'dismissed'> = {
+  save: 'saved',
+  archive: 'archived',
+  dismiss: 'dismissed',
+};
+
+function execTriageInbox(args: {
+  video_id: string;
+  action: 'save' | 'archive' | 'dismiss';
+}): ToolResult {
+  const next = TRIAGE_NEXT[args.action];
+  if (!next) return { ok: false, error: 'invalid_action' };
+  try {
+    setConsumptionStatus(args.video_id, next);
+    return {
+      ok: true,
+      data: { video_id: args.video_id, status: next },
+      summary: `${args.action}d ${args.video_id}`,
+    };
+  } catch (err) {
+    if (err instanceof IllegalTransitionError) {
+      return { ok: false, error: 'illegal_transition', summary: err.message };
+    }
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+function execResurface(args: { video_id: string }): ToolResult {
+  try {
+    setConsumptionStatus(args.video_id, 'saved');
+    return {
+      ok: true,
+      data: { video_id: args.video_id, status: 'saved' },
+      summary: `resurfaced ${args.video_id} → saved`,
+    };
+  } catch (err) {
+    if (err instanceof IllegalTransitionError) {
+      return { ok: false, error: 'illegal_transition', summary: err.message };
+    }
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+// --- mute_cluster_today ---------------------------------------------------
+
+function execMuteClusterToday(args: { cluster_id: number }): ToolResult {
+  try {
+    const result = setMuteToday(args.cluster_id);
+    return {
+      ok: true,
+      data: { cluster_id: args.cluster_id, muted: result.muted },
+      summary: result.muted
+        ? `muted cluster #${args.cluster_id} for today`
+        : `un-muted cluster #${args.cluster_id} for today`,
+    };
+  } catch (err) {
+    if (err instanceof ClusterNotFoundError) {
+      return { ok: false, error: 'cluster_not_found' };
+    }
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 }
 
 // --- dispatcher -----------------------------------------------------------
 
-export const SLOT_MUTATION_TOOLS: ReadonlySet<ToolName> = new Set([
-  'assign_slot',
-  'swap_slots',
-  'clear_slot',
-]);
-
 export async function executeTool(
   name: string,
   args: Record<string, unknown>,
-  ctx: ToolContext,
 ): Promise<ToolResult> {
   try {
     switch (name) {
       case 'search_pool':
-        // Access pool via getInboxPool to assert draft exists — catches a
-        // typo'd issueId early, but the actual query is the dedicated helper.
-        getInboxPool(ctx.issueId);
         return execSearchPool(args as Parameters<typeof execSearchPool>[0]);
       case 'rank_by_theme':
         return await execRankByTheme(
@@ -549,17 +624,33 @@ export async function executeTool(
         );
       case 'get_taste_clusters':
         return execGetTasteClusters();
-      case 'assign_slot':
-        return execAssignSlot(
-          ctx,
-          args as Parameters<typeof execAssignSlot>[1],
+      case 'create_playlist':
+        return execCreatePlaylist(
+          args as Parameters<typeof execCreatePlaylist>[0],
         );
-      case 'swap_slots':
-        return execSwapSlots(ctx, args as unknown as SwapArgs);
-      case 'clear_slot':
-        return execClearSlot(
-          ctx,
-          args as Parameters<typeof execClearSlot>[1],
+      case 'add_to_playlist':
+        return execAddToPlaylist(
+          args as Parameters<typeof execAddToPlaylist>[0],
+        );
+      case 'remove_from_playlist':
+        return execRemoveFromPlaylist(
+          args as Parameters<typeof execRemoveFromPlaylist>[0],
+        );
+      case 'reorder_playlist':
+        return execReorderPlaylist(
+          args as Parameters<typeof execReorderPlaylist>[0],
+        );
+      case 'triage_inbox':
+        return execTriageInbox(
+          args as Parameters<typeof execTriageInbox>[0],
+        );
+      case 'mute_cluster_today':
+        return execMuteClusterToday(
+          args as Parameters<typeof execMuteClusterToday>[0],
+        );
+      case 'resurface':
+        return execResurface(
+          args as Parameters<typeof execResurface>[0],
         );
       default:
         return { ok: false, error: `unknown_tool:${name}` };

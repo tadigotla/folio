@@ -2,17 +2,21 @@ import Link from 'next/link';
 import type { ReactNode } from 'react';
 import { formatDuration, relativeTime } from '../lib/time';
 import type { VideoWithConsumption } from '../lib/consumption';
+import type { PlaylistMembership } from '../lib/playlists';
+import { AddToPlaylistButton } from './playlist/AddToPlaylistButton';
 
 export function VideoCard({
   video,
   action,
   focused,
   rootRef,
+  playlists,
 }: {
   video: VideoWithConsumption;
   action?: ReactNode;
   focused?: boolean;
   rootRef?: React.Ref<HTMLDivElement>;
+  playlists?: PlaylistMembership[];
 }) {
   const duration = formatDuration(video.duration_seconds);
   const published = video.published_at ? relativeTime(video.published_at) : null;
@@ -82,7 +86,17 @@ export function VideoCard({
         </div>
       </Link>
 
-      {action && <div className="mt-3 flex gap-2">{action}</div>}
+      {(action || playlists) && (
+        <div className="mt-3 flex items-center gap-2">
+          {action}
+          {playlists && (
+            <AddToPlaylistButton
+              videoId={video.id}
+              initialMemberships={playlists}
+            />
+          )}
+        </div>
+      )}
     </div>
   );
 }

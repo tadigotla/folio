@@ -1,6 +1,6 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
-import { TopNav } from '../../../components/issue/TopNav';
+import { TopNav } from '../../../components/TopNav';
 import { Kicker } from '../../../components/ui/Kicker';
 import { Rule } from '../../../components/ui/Rule';
 import { DuotoneThumbnail } from '../../../components/DuotoneThumbnail';
@@ -10,11 +10,13 @@ import { ReassignPopover } from '../../../components/taste/ReassignPopover';
 import { MergeDialog } from '../../../components/taste/MergeDialog';
 import { SplitDialog } from '../../../components/taste/SplitDialog';
 import { RetireConfirm } from '../../../components/taste/RetireConfirm';
+import { MuteTodayButton } from '../../../components/taste/MuteTodayButton';
 import {
   getClusterDetail,
   getClusterMembers,
   getClusterSummaries,
 } from '../../../lib/taste-read';
+import { isMutedToday } from '../../../lib/mutes';
 import { formatDuration, toLocalDateTime } from '../../../lib/time';
 
 export const dynamic = 'force-dynamic';
@@ -44,6 +46,7 @@ export default async function ClusterDetailPage({
     memberCount: c.memberCount,
   }));
   const isRetired = cluster.retiredAt !== null;
+  const mutedToday = !isRetired && isMutedToday(cluster.id);
   const sourceCandidate = {
     id: cluster.id,
     label: cluster.label,
@@ -80,11 +83,17 @@ export default async function ClusterDetailPage({
             )}
           </div>
           {!isRetired && (
-            <WeightSlider
-              clusterId={cluster.id}
-              initialWeight={cluster.weight}
-              expectedUpdatedAt={cluster.updatedAt}
-            />
+            <div className="flex flex-col items-end gap-2">
+              <WeightSlider
+                clusterId={cluster.id}
+                initialWeight={cluster.weight}
+                expectedUpdatedAt={cluster.updatedAt}
+              />
+              <MuteTodayButton
+                clusterId={cluster.id}
+                initiallyMuted={mutedToday}
+              />
+            </div>
           )}
         </div>
         <p className="mt-2 font-sans text-xs text-ink-soft">

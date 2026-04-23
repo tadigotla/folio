@@ -1,14 +1,15 @@
 # Runbook
-_Last verified: 2026-04-22 (conversational-editor-ui)_
+_Last verified: 2026-04-23 (magazine-teardown: issues/sections/compose dropped; conversations now per-day; `/chat` mounts the curation agent)_
 
 ## Overview
-Folio — a personal YouTube-library magazine. Single-process Next.js 16 app
-(React 19) on port **6060**, reading/writing a local SQLite file (`events.db`
-at the repo root — still named `events.db` for historical reasons; it now
-holds `videos`, `channels`, `consumption`, `video_provenance`, `import_log`,
-etc.). All corpus data is imported **on demand** from the user's YouTube
-account via the `/settings/youtube` page. No cron, no background jobs, no
-Docker, no prod deployment, no staging — this runs locally only.
+Folio — a personal, taste-aware consumption room for YouTube. Single-process
+Next.js 16 app (React 19) on port **6060**, reading/writing a local SQLite
+file (`events.db` at the repo root — still named `events.db` for historical
+reasons; it now holds `videos`, `channels`, `consumption`, `video_provenance`,
+`import_log`, the taste substrate, playlists, and per-day conversation logs).
+All corpus data is imported **on demand** from the user's YouTube account
+via the `/settings/youtube` page. No cron, no background jobs, no Docker,
+no prod deployment, no staging — this runs locally only.
 
 ## Services & Ports
 | Service    | Port | Purpose                                                   |
@@ -29,12 +30,14 @@ Docker, no prod deployment, no staging — this runs locally only.
    with Import buttons enabled.
 
 ## Before risky migrations — **`just backup-db`**
-**Any destructive migration MUST be preceded by `just backup-db`.** The
-library-pivot migration (`010_library_pivot.sql`) drops the `sources` and
-`issues` tables and truncates `videos`, `channels`, `consumption`,
-`channel_tags`, `sections`, and `tags`. It is the intended one-time reset
-for the Phase 1 pivot — but if you are re-applying it on a DB that already
-holds content, back up first.
+**Any destructive migration MUST be preceded by `just backup-db`.** Two
+historical migrations are net-destructive on a populated DB:
+`010_library_pivot.sql` (the original library pivot — truncated `videos`,
+`channels`, `consumption`, `channel_tags`, `tags`, and dropped legacy
+tables) and `016_magazine_teardown.sql` (dropped `issues`, `issue_slots`,
+`sections`, `channels.section_id`, and reshaped `conversations` to
+per-day scope). If you are re-applying either on a DB that already holds
+content, back up first.
 
 `just backup-db` checkpoints WAL and writes `events.db.YYYYMMDD-HHMMSS.bak`
 alongside the live DB. To roll back after a botched migration:
@@ -131,9 +134,9 @@ is comfortably under the 10,000 units/day default quota.
 ## Data reset
 The library-pivot migration (`010_library_pivot.sql`) is destructive: it
 drops the legacy `sources` and `issues` tables and truncates the content
-tables (`videos`, `channels`, `consumption`, `channel_tags`, `sections`,
-`tags`). It runs automatically on next boot after the migration file
-lands in `db/migrations/`.
+tables (`videos`, `channels`, `consumption`, `channel_tags`, `tags`). It
+runs automatically on next boot after the migration file lands in
+`db/migrations/`.
 
 **Before the first boot with this migration** present:
 
@@ -146,41 +149,6 @@ lands in `db/migrations/`.
 **Rollback** is the two-step procedure in the "Before risky migrations"
 section above: restore the backup **and** `git revert` the migration
 commit.
-
-## Editor workspace
-The home page at `/` is the editor when a corpus is present. Compose an
-issue by dragging videos from the inbox **pool** (right column) onto the
-slots on the **board** (left column). Each issue has exactly 14 slots:
-1 cover, 3 featured, 10 briefs. Empty slots render as dashed placeholders.
-
-### Lifecycle
-- `draft → published`, one direction. Published issues are frozen — the
-  API rejects slot mutations on them with HTTP 409 `issue_frozen`.
-- **At most one draft at a time.** `POST /api/issues` returns HTTP 409
-  `{ error: 'draft_exists', draft_id }` if a draft already exists. The
-  **Discard** button in the workspace header deletes the current draft
-  (and all its slot assignments) so a new one can be started.
-- Publishing a **partial** issue is allowed — any slot count from 1 to 14
-  will publish. Empty slots render as muted placeholders on `/issues/[id]`.
-- Assigning an inbox video to any slot auto-promotes its consumption
-  status `inbox → saved` in the same transaction. Clearing or swapping a
-  slot does **not** demote.
-
-### Where published issues live
-- `/issues` — reverse-chron grid of all published issues.
-- `/issues/[id]` — read-only magazine-style view.
-
-### Desktop only
-The drag-and-drop workspace is **desktop-only**. On a mobile user agent
-the home page renders an "open on desktop" message; `/library`,
-`/issues`, `/issues/[id]`, and `/watch/[id]` remain fully mobile. There
-is no touch drag-and-drop fallback in this phase.
-
-### URL change
-`/inbox` has been **removed**. Triage now happens inside the editor
-workspace by dragging videos from the pool into slots, or dismissing
-them with the hover button on the pool card. Bookmarks to `/inbox`
-will 404.
 
 ## Taste substrate
 The taste substrate is phase-1 data plane work for the conversational-editor
@@ -195,9 +163,10 @@ umbrella. It builds two artifacts the later phases depend on:
 Two supporting tables: `video_enrichment` (LLM-generated 50-word summary + 3
 tags per video) and `video_transcripts` (YouTube auto-captions when available).
 
-No UI surfaces this yet. It is read by later changes (`taste-lab`,
-`overnight-brief`, `editorial-agent`). Storage overhead is ~35 MB for 5,665
-videos' embeddings plus variable transcript text.
+Surfaces that read it: `/taste` (the cluster lab), `/` (home ranking via
+`taste_clusters.weight`), and the curation agent's `get_taste_clusters` /
+`rank_by_theme` tools. Storage overhead is ~35 MB for 5,665 videos'
+embeddings plus variable transcript text.
 
 ### Setup
 
@@ -263,9 +232,8 @@ user-assigned label is preserved for history.
 
 ## Taste lab
 
-`/taste` is the human-tending surface for the cluster map. Phase 1
-(`taste-substrate`) populated the map; phase 2 (`taste-lab`) makes it
-editable.
+`/taste` is the human-tending surface for the cluster map. The substrate
+populates the map; the lab makes it editable.
 
 ### What lives there
 
@@ -278,7 +246,7 @@ editable.
   re-acquire members.
 - A "Retired" disclosure listing soft-deleted clusters, most-recent
   first. Their labels and centroids are preserved for history.
-- A drift indicator in the masthead — the count of liked videos
+- A drift indicator in the page header — the count of liked videos
   (`consumption.status IN ('saved','in_progress','archived')`) whose
   cluster-assignment cosine similarity is below 0.6. Hidden when fewer
   than 30 likes exist.
@@ -291,9 +259,9 @@ Retire actions for the cluster as a whole.
 
 - **Labels** are free-form text; trimmed; an empty string is stored as
   `NULL`.
-- **Weights** are floats in `[0.0, 3.0]`, step `0.1`. The agent (phase 3)
-  will read these to scale theme emphasis. Today nothing reads them — the
-  slider is **prospective**.
+- **Weights** are floats in `[0.0, 3.0]`, step `0.1`. They are read by the
+  home ranking (`rankForHome` clamps to `[0, 2]`) and surfaced to the
+  curation agent's snapshot.
 - **Reassigning a single video** updates that one assignment row; it does
   not recompute centroids and does not retire an emptied source cluster.
 - **Merging** moves the source's assignments into the target, recomputes
@@ -339,29 +307,29 @@ rebuilt; reload."
 - No new env vars. The drift threshold (0.6) and minimum-likes gate
   (30) are constants in `src/lib/taste-read.ts`; tweak in code if you
   want different signals.
-- Weights are stored but not consumed yet. They land in phase 3 of the
-  conversational-editor umbrella, where the agent reads them to scale
-  theme emphasis. Edit them ahead of time if you like — they will pick
-  up where you left off when phase 3 ships.
+- Weights are read by the home ranking and the curation agent. Edits
+  take effect on the next `/` render and on the next agent turn.
 
-## Editor agent
+## Curation agent
 
-The home page at `/` gains a chat panel alongside the slot board once a
-draft exists. The agent is bound to the current draft issue: it reads your
-taste-cluster map, the draft state, and the inbox pool; calls a small set of
-tools; and writes slot assignments through the same library path the drag
-board uses. Conversations are persisted per draft and freeze when the
-issue is published. Discarding a draft cascade-deletes its conversation.
+`/chat` mounts the curation companion. It reads your taste-cluster map,
+your consumption counts, in-progress videos, and your playlists; calls a
+small set of tools; and writes through the same library paths the rest of
+the app uses (`setConsumptionStatus`, `addToPlaylist`, etc.).
+Conversations are scoped to the local-day (one row per
+`scope_date` in `conversations`); the first message of a day inserts the
+row, every subsequent message that day appends to it. Conversations carry
+no draft binding; they are not freezable, only purgeable.
 
 ### Model and cost
 
 Default model is `claude-sonnet-4-6`. Set `AGENT_MODEL=claude-opus-4-7` in
-`.env` for harder composition sessions (higher cost). Typical session cost:
+`.env` for harder sessions (higher cost). Typical session cost:
 **$0.05–0.20** at Sonnet pricing with prompt caching enabled. A runaway
 tool loop is capped at `AGENT_MAX_TURNS` (default 10); worst case ~$0.50.
 
 Prompt caching is enabled at two boundaries (system prompt + tool
-descriptions, and the per-turn draft/pool/cluster snapshot) so repeated
+descriptions, and the per-turn consumption-home snapshot) so repeated
 turns within a session pay for only the new user message + assistant
 response. TTL is 5 minutes — long idle gaps re-bill the prefix.
 
@@ -369,11 +337,18 @@ response. TTL is 5 minutes — long idle gaps re-bill the prefix.
 
 1. Set `ANTHROPIC_API_KEY` in `.env`. See `.env.example`.
 2. Restart `just dev`.
-3. Visit `/` with a draft open — the chat panel should render to the
-   right of the board at viewports ≥1280px, stacked below at narrower
-   desktop widths, and hidden entirely on mobile.
+3. Visit `/chat`. The panel hydrates today's conversation, if any, and is
+   ready to accept input.
 4. Without a key, the chat panel renders a disabled card pointing back
-   here. The board remains fully usable.
+   here. The rest of the app is unaffected.
+
+### Tools
+
+Eleven tools, no slot tools, no taste-table mutations beyond the per-day
+mute. See `openspec/specs/curation-agent/spec.md` for the canonical list:
+`search_pool`, `rank_by_theme`, `get_video_detail`, `get_taste_clusters`,
+`create_playlist`, `add_to_playlist`, `remove_from_playlist`,
+`reorder_playlist`, `triage_inbox`, `mute_cluster_today`, `resurface`.
 
 ### Key rotation
 
@@ -383,13 +358,14 @@ process.
 
 ### Privacy posture
 
-Every user turn (plus the bounded per-turn snapshot: cluster labels,
-video titles/channels, current slot fill, draft title) is sent to the
-Anthropic API. Anthropic's retention policy governs that data path.
-Conversation turns are also persisted locally inside `events.db`
-(`conversations`, `conversation_turns`). No third party beyond Anthropic
-sees any of this. YouTube transcripts and video IDs may appear inside
-tool results — `get_video_detail` truncates transcripts to 500 chars.
+Every user turn (plus the bounded per-turn snapshot: cluster labels with
+weights, top members, in-progress titles, playlist names + counts,
+consumption counts) is sent to the Anthropic API. Anthropic's retention
+policy governs that data path. Conversation turns are also persisted
+locally inside `events.db` (`conversations`, `conversation_turns`). No
+third party beyond Anthropic sees any of this. YouTube transcripts and
+video IDs may appear inside tool results — `get_video_detail` truncates
+transcripts to 500 chars.
 
 There is **no** local-model fallback for the conversational agent
 itself. Local fallback remains available for embedding + enrichment
@@ -397,16 +373,184 @@ itself. Local fallback remains available for embedding + enrichment
 
 ### Force-dumping a runaway conversation
 
-There is no separate "clear conversation" button. To abandon a
-conversation mid-flight, click **Discard** on the draft — the
-`conversations` row and all `conversation_turns` rows cascade-delete
-along with the issue. Then start a new draft; a fresh conversation
-begins automatically on the first message.
+To abandon today's conversation, drop it from SQL:
+
+```
+sqlite3 events.db "DELETE FROM conversations WHERE scope_date = date('now','localtime')"
+```
+
+Cascading `ON DELETE CASCADE` on `conversation_turns.conversation_id`
+takes the turns with it. The next message that day starts fresh.
 
 ### No scheduled jobs
 
-The editor agent runs only while a user is on `/` and sends a message.
-No cron, no background workers, no `justfile` additions.
+The curation agent runs only while a user is on `/chat` and sends a
+message. No cron, no background workers, no `justfile` additions.
+
+## Playlists
+
+`/playlists` is a surface for grouping videos into named, ordered
+collections. A video may be in any number of playlists simultaneously
+and may also be in the inbox or library — these are independent axes.
+
+### Creation and editing
+
+- `/playlists` lists existing playlists sorted by most-recently-edited.
+  Click **+ New playlist** in the header → enter a name (required) and
+  optional description → land on the new detail page.
+- `/playlists/[id]` is the per-playlist page. Header has **Edit**
+  (inline rename + description) and **Delete** (two-click confirm; on
+  confirm redirects to `/playlists`).
+- Each item row has **↑ / ↓** buttons to reorder and **Remove** to
+  drop the video from this playlist. None of these affect the video's
+  consumption state.
+
+### Adding a video to a playlist
+
+- Every video card on `/library` shows an **Add to playlist** popover
+  (the small `♪` button next to the consumption action). The button
+  label flips to **♪ In N** when the video is already in N playlists.
+- The popover lists all playlists with checkboxes; toggling a checkbox
+  immediately POSTs/DELETEs an item — no separate save step.
+- **+ Create new playlist** at the bottom of the popover creates a
+  playlist and adds the current video to it in two API calls.
+
+### Position rebalance notes
+
+- `playlist_items.position` is a dense integer but only the affected
+  range is renumbered on reorder, so occasional gaps after removals
+  are tolerated. Ordered reads use `ORDER BY position ASC` and are
+  gap-tolerant. There is no eager compaction.
+- Adding a video defaults to appending at `MAX(position) + 1`. Adding
+  with an explicit `position` shifts everything at-or-above it up by
+  one inside the same transaction.
+- Reorder requests are clamped to `[1, COUNT(*)]`; a no-op reorder
+  (target equals current position) does NOT touch `updated_at`.
+
+### `show_on_home` flag
+
+`PATCH /api/playlists/[id]` accepts `{ show_on_home: true|false }` and
+persists the value. `/` renders every playlist with `show_on_home = 1`
+as a card in the **On the shelf** rail, ordered by `updated_at DESC`.
+Toggle from the command line:
+
+```
+curl -X PATCH http://localhost:6060/api/playlists/7 \
+  -H 'content-type: application/json' \
+  -d '{"show_on_home": true}'
+```
+
+There is no in-UI toggle yet; that belongs to a follow-up change.
+
+### Manual SQL recovery
+
+- Force-delete a playlist (cascade clears items):
+  `sqlite3 events.db "DELETE FROM playlists WHERE id=?"`
+- Inspect raw item order:
+  `sqlite3 events.db "SELECT position, video_id FROM playlist_items WHERE playlist_id=? ORDER BY position"`
+- Renormalize positions (dense 1..N) for one playlist if reorder
+  history left awkward gaps:
+  ```sql
+  WITH ranked AS (
+    SELECT video_id, ROW_NUMBER() OVER (ORDER BY position) AS rn
+      FROM playlist_items WHERE playlist_id = :id
+  )
+  UPDATE playlist_items SET position = (
+    SELECT rn FROM ranked WHERE ranked.video_id = playlist_items.video_id
+  ) WHERE playlist_id = :id;
+  ```
+  Expected to be rare enough not to warrant a UI affordance.
+- Drop the entire feature (rollback):
+  `sqlite3 events.db "DROP TABLE playlist_items; DROP TABLE playlists; DELETE FROM _migrations WHERE name='014_playlists.sql';"`
+  then revert the migration commit.
+
+### No new env vars or jobs
+
+Playlists add no env vars, no cron jobs, no background workers, and
+no `just` verbs. All mutations are user-initiated through the UI or
+direct `/api/playlists/**` calls.
+
+## Home ranking rail
+
+`/` is the consumption home: top-to-bottom, `TopNav` → **"For right
+now"** rail → **Continue** rail (up to 4 `in_progress` videos) →
+**On the shelf** rail (playlists with `show_on_home = 1`) → a quiet
+entry-point footer (Library · Playlists · Inbox · Taste · Settings).
+Rendered whenever a corpus is present (connected + `videos > 0`). The
+"For right now" rail reads `taste_clusters.weight` — cluster-weight
+edits on `/taste` observably shift the rail on next page load.
+
+`ContinueRail` and `ShelfRail` each render nothing when empty (no
+heading, no container), so a low-state home is just "For right now"
+plus the footer. The footer renders unconditionally in the
+connected-with-corpus branch. There is no masthead; the consumption
+home runs without a title card. Container width is `max-w-5xl`.
+
+### Scoring
+
+Per-video score is `clusterWeight × freshness × stateBoost × fuzzyPenalty`.
+Candidate pool filters to `consumption.status IN ('inbox', 'saved', 'in_progress')`.
+
+| Component      | Value                                                                   |
+|----------------|-------------------------------------------------------------------------|
+| `clusterWeight`| `taste_clusters.weight` clamped to `[0, 2]`; `0.5` when unembedded or the assigned cluster is retired; `0` when muted today. |
+| `freshness`    | `exp(-ageDays / 14)` with `ageDays` clamped to `>= 0`; `0.5` when `published_at IS NULL`. Half-life constant `HOME_RANKING_HALF_LIFE_DAYS = 14`. |
+| `stateBoost`   | `1.0` inbox, `1.3` saved, `1.5` in_progress.                            |
+| `fuzzyPenalty` | `0.7` when `video_cluster_assignments.is_fuzzy = 1`, else `1.0`.        |
+
+The rail shows up to 10 candidates. Sort is score desc with `video_id`
+asc tie-break; results are deterministic for a given `now`. No caching —
+each `/` render recomputes from SQLite. Constants live in
+`src/lib/home-ranking.ts` (`HOME_RANKING_HALF_LIFE_DAYS`, `FUZZY_PENALTY`,
+`UNKNOWN_CLUSTER_WEIGHT`, `UNKNOWN_FRESHNESS`); no env overrides.
+
+### Mute-today
+
+Every cluster row on `/taste` and the detail header on
+`/taste/[clusterId]` has a **Mute today** button. A mute zeroes
+`clusterWeight` for videos assigned to that cluster for the rest of the
+local day (America/New_York) without touching `taste_clusters.weight`
+or its `updated_at`. Click again to un-mute within the same day. Mutes
+auto-clear at local midnight because queries filter by today's date —
+no sweeper job.
+
+Persistence is one row per `(cluster_id, muted_on)` in
+`taste_cluster_mutes` (migration `015_taste_cluster_mutes.sql`).
+Manual inspection:
+
+```
+sqlite3 events.db "SELECT * FROM taste_cluster_mutes WHERE muted_on = date('now','localtime')"
+```
+
+### Debug API
+
+`GET /api/home/ranking?limit=20&debug=1` returns the score breakdown for
+every candidate:
+
+```json
+{ "candidates": [
+  { "videoId": "abc123", "score": 1.29,
+    "clusterWeight": 1.5, "freshness": 0.82,
+    "stateBoost": 1.3, "fuzzyPenalty": 1.0,
+    "clusterId": 7, "clusterLabel": "systems thinking" }
+] }
+```
+
+Without `debug`, only `videoId` and `score` are returned. `limit` must
+be an integer in `[1, 100]`; malformed values get `400`. The route is
+read-only and safe to hammer.
+
+### Reverting
+
+Full removal: drop the migration's table
+(`DROP TABLE taste_cluster_mutes; DELETE FROM _migrations WHERE name='015_taste_cluster_mutes.sql';`),
+revert the migration commit, and remove the `<RightNowRail />` line from
+[src/app/page.tsx](src/app/page.tsx).
+
+### No new `just` verbs
+
+Ranking is data-driven; nothing to schedule, rebuild, or re-seed. The
+existing `dev`/`status`/`logs`/`backup-db` verbs are unchanged.
 
 ## Accessing the dev server from another host
 
@@ -446,8 +590,8 @@ changes are **not** hot-reloaded — you must restart the dev server.
   `sqlite3 events.db` shell open while the dev server is writing.
 - **"Where did dev server logs go?"** — `next dev` runs in the
   foreground. Logs only exist in whatever terminal ran `just dev`.
-- **`/inbox` returns 404** — expected. The raw inbox page was removed
-  in the editor-workspace change; use the editor at `/` instead.
-- **Can't start a new issue, button is missing** — there is already a
-  draft. Either finish it (Publish), or click **Discard** on the
-  workspace header to throw it away. Only one draft may exist at a time.
+- **`/compose`, `/issues`, `/sections`, `/section/*` all 404** —
+  expected. The magazine surface (issue editor, section management,
+  published-issue archive) was removed by `magazine-teardown` on
+  2026-04-23. Triage now lives at `/inbox`; the curation companion
+  lives at `/chat`; ranked candidates live on `/`.

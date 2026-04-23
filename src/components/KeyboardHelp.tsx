@@ -18,39 +18,19 @@ const GROUPS: Group[] = [
     bindings: [{ keys: ['?'], help: 'Toggle this help' }],
   },
   {
-    scope: 'Workspace  (/)',
-    bindings: [
-      { keys: ['/'], help: 'Focus pool search' },
-      { keys: ['Delete'], help: 'Clear focused slot' },
-      { keys: ['n'], help: 'New draft (when none exists)' },
-      { keys: ['⌘', 'K'], help: 'Focus editor-agent composer' },
-    ],
-  },
-  {
     scope: 'Watch  (/watch/[id])',
     bindings: [
-      { keys: ['n'], help: 'Next piece in issue' },
+      { keys: ['n'], help: 'Next piece' },
       { keys: ['p'], help: 'Previous piece' },
       { keys: ['s'], help: 'Save (auto-advance)' },
       { keys: ['a'], help: 'Archive (auto-advance)' },
       { keys: ['d'], help: 'Dismiss (auto-advance)' },
-      { keys: ['.'], help: 'Pin as today’s cover' },
       { keys: ['⌘', 'Z'], help: 'Undo the last s/a/d within 1.2s' },
-    ],
-  },
-  {
-    scope: 'Sections  (/sections)',
-    bindings: [
-      { keys: ['j'], help: 'Next channel row' },
-      { keys: ['k'], help: 'Previous channel row' },
-      { keys: ['1', '–', '9'], help: 'Assign focused channel to Nth section' },
-      { keys: ['0'], help: 'Move to Unsorted' },
     ],
   },
   {
     scope: 'Taxonomy',
     bindings: [
-      { keys: ['click'], help: 'Section chip — pick/create a section (1:1)' },
       { keys: ['click'], help: 'Tags chip — toggle any tags (M:N)' },
     ],
   },

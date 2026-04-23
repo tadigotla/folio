@@ -23,6 +23,11 @@ export function relativeTime(utcIso: string): string {
   return formatDistanceToNowStrict(new Date(utcIso), { addSuffix: true });
 }
 
+/** Today's date as `YYYY-MM-DD` in America/New_York. */
+export function todayLocal(now: Date = new Date()): string {
+  return formatInTimeZone(now, TZ, 'yyyy-MM-dd');
+}
+
 /** Format a duration in seconds as "M:SS" or "H:MM:SS". Returns null if input is nullish. */
 export function formatDuration(seconds: number | null | undefined): string | null {
   if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return null;

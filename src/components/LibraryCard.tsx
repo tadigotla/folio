@@ -3,13 +3,17 @@ import type { ReactNode } from 'react';
 import { DuotoneThumbnail } from './DuotoneThumbnail';
 import { formatDuration, relativeTime } from '../lib/time';
 import type { VideoWithConsumption } from '../lib/consumption';
+import type { PlaylistMembership } from '../lib/playlists';
+import { AddToPlaylistButton } from './playlist/AddToPlaylistButton';
 
 export function LibraryCard({
   video,
   action,
+  playlists,
 }: {
   video: VideoWithConsumption;
   action?: ReactNode;
+  playlists?: PlaylistMembership[];
 }) {
   const duration = formatDuration(video.duration_seconds);
   const published = video.published_at ? relativeTime(video.published_at) : null;
@@ -55,7 +59,17 @@ export function LibraryCard({
         </h3>
         <div className="mt-1 italic text-sage text-xs">{published}</div>
       </Link>
-      {action && <div className="mt-3 flex gap-3">{action}</div>}
+      {(action || playlists) && (
+        <div className="mt-3 flex items-center gap-3">
+          {action}
+          {playlists && (
+            <AddToPlaylistButton
+              videoId={video.id}
+              initialMemberships={playlists}
+            />
+          )}
+        </div>
+      )}
     </div>
   );
 }

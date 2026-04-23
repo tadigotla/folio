@@ -1,12 +1,6 @@
 import type { NextRequest } from 'next/server';
 import { hasApiKey } from '../../../../lib/agent/client';
-import {
-  runAgentTurn,
-  ConversationFrozenError,
-  IssueMissingError,
-  type AgentEvent,
-} from '../../../../lib/agent/run';
-import { getIssueById } from '../../../../lib/issues';
+import { runAgentTurn, type AgentEvent } from '../../../../lib/agent/run';
 
 export const dynamic = 'force-dynamic';
 
@@ -24,23 +18,10 @@ export async function POST(request: NextRequest) {
     return jsonErr('invalid_payload', 400);
   }
 
-  const { issueId, content } = (body ?? {}) as {
-    issueId?: unknown;
-    content?: unknown;
-  };
-  if (typeof issueId !== 'number' || !Number.isInteger(issueId) || issueId <= 0) {
-    return jsonErr('invalid_payload', 400);
-  }
+  const { content } = (body ?? {}) as { content?: unknown };
   if (typeof content !== 'string' || content.trim().length === 0) {
     return jsonErr('invalid_payload', 400);
   }
-
-  // Pre-check the issue exists and is not published. Doing this before we
-  // start the SSE stream lets us respond with the right HTTP status code
-  // (404/409) rather than swallowing the case into an error frame.
-  const issue = getIssueById(issueId);
-  if (!issue) return jsonErr('issue_not_found', 404);
-  if (issue.status === 'published') return jsonErr('conversation_frozen', 409);
 
   const encoder = new TextEncoder();
 
@@ -55,22 +36,12 @@ export async function POST(request: NextRequest) {
       }
 
       try {
-        await runAgentTurn({
-          issueId,
-          userContent: content,
-          onEvent: send,
-        });
+        await runAgentTurn({ userContent: content, onEvent: send });
       } catch (err) {
-        if (err instanceof ConversationFrozenError) {
-          send({ type: 'error', message: 'conversation_frozen' });
-        } else if (err instanceof IssueMissingError) {
-          send({ type: 'error', message: 'issue_not_found' });
-        } else {
-          send({
-            type: 'error',
-            message: err instanceof Error ? err.message : String(err),
-          });
-        }
+        send({
+          type: 'error',
+          message: err instanceof Error ? err.message : String(err),
+        });
         send({ type: 'done', messageId: null });
       } finally {
         controller.close();

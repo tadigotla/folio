@@ -3,7 +3,7 @@ import { notFound } from 'next/navigation';
 import { getDb } from '../../../lib/db';
 import { getTagBySlug } from '../../../lib/tags';
 import { formatDuration, relativeTime } from '../../../lib/time';
-import { TopNav } from '../../../components/issue/TopNav';
+import { TopNav } from '../../../components/TopNav';
 import { DuotoneThumbnail } from '../../../components/DuotoneThumbnail';
 import { Kicker } from '../../../components/ui/Kicker';
 import { Rule } from '../../../components/ui/Rule';

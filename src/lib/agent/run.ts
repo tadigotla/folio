@@ -2,14 +2,12 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { getAnthropic, getAgentModel, getAgentMaxTurns } from './client';
 import { buildSystem } from './system-prompt';
 import { buildSnapshotBlock } from './snapshot';
-import { getToolsForRequest, executeTool, SLOT_MUTATION_TOOLS } from './tools';
+import { getToolsForRequest, executeTool, STATE_MUTATION_TOOLS } from './tools';
 import {
   appendTurn,
-  getConversationTurns,
-  getOrCreateConversation,
+  getConversationTurnsByConversationId,
+  getOrCreateConversationForToday,
   turnsToMessages,
-  ConversationFrozenError,
-  IssueMissingError,
 } from './turns';
 import type { TurnContentBlock } from '../types';
 
@@ -33,12 +31,9 @@ export type AgentEvent =
   | { type: 'done'; messageId: string | null };
 
 export interface RunAgentTurnOptions {
-  issueId: number;
   userContent: string;
   onEvent: (event: AgentEvent) => void;
 }
-
-export { ConversationFrozenError, IssueMissingError };
 
 function blockToContentBlock(
   block: Anthropic.ContentBlock,
@@ -57,29 +52,23 @@ function blockToContentBlock(
 
 /**
  * Drives the multi-turn tool loop server-side for a single user message.
- * Persists every turn (user, assistant, tool) to `conversation_turns` and
- * yields framing events to the caller via `onEvent`.
- *
- * This is the *only* place that should instantiate the Anthropic client and
- * run the agentic loop. The API route is a thin SSE adapter over this.
+ * Resolves today's `scope_date` (America/New_York), persists every turn to
+ * `conversation_turns`, and yields framing events to the caller via
+ * `onEvent`. The only place the Anthropic client is instantiated.
  */
 export async function runAgentTurn(opts: RunAgentTurnOptions): Promise<void> {
-  const { issueId, userContent, onEvent } = opts;
+  const { userContent, onEvent } = opts;
 
   const anthropic = getAnthropic();
-  const conversation = getOrCreateConversation(issueId);
+  const conversation = getOrCreateConversationForToday();
 
-  // Persist the user turn *before* the first API call — a network failure
-  // must not lose the user's input.
   const userBlocks: TurnContentBlock[] = [{ type: 'text', text: userContent }];
   appendTurn(conversation.id, 'user', userBlocks);
 
   const maxTurns = getAgentMaxTurns();
 
   for (let iter = 0; iter < maxTurns; iter++) {
-    // Rebuild history each iteration so tool turns persisted mid-loop are
-    // visible to the next Anthropic call.
-    const history = getConversationTurns(issueId);
+    const history = getConversationTurnsByConversationId(conversation.id);
     const messages: Anthropic.MessageParam[] = turnsToMessages(history).map(
       (m) => ({
         role: m.role,
@@ -87,9 +76,7 @@ export async function runAgentTurn(opts: RunAgentTurnOptions): Promise<void> {
       }),
     );
 
-    // Snapshot as the first user message, cached for the duration of the loop.
-    // This is additive — the persisted history stays source-of-truth.
-    const snapshotBlock = buildSnapshotBlock(issueId);
+    const snapshotBlock = buildSnapshotBlock();
     const augmented: Anthropic.MessageParam[] = [
       { role: 'user', content: [snapshotBlock] },
       ...messages,
@@ -113,11 +100,9 @@ export async function runAgentTurn(opts: RunAgentTurnOptions): Promise<void> {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       onEvent({ type: 'error', message: msg });
-      // User turn is already persisted; we bail without an assistant turn.
       return;
     }
 
-    // Persist the assistant turn verbatim (text + tool_use blocks).
     const assistantBlocks = finalMessage.content
       .map(blockToContentBlock)
       .filter((b): b is TurnContentBlock => b !== null);
@@ -139,8 +124,6 @@ export async function runAgentTurn(opts: RunAgentTurnOptions): Promise<void> {
       return;
     }
 
-    // Execute every tool_use, emit events, persist one tool turn per
-    // user-facing response with all tool_result blocks combined.
     const toolResultBlocks: TurnContentBlock[] = [];
     for (const use of toolUses) {
       const args = (use.input ?? {}) as Record<string, unknown>;
@@ -150,12 +133,12 @@ export async function runAgentTurn(opts: RunAgentTurnOptions): Promise<void> {
         name: use.name,
         args,
       });
-      const result = await executeTool(use.name, args, { issueId });
+      const result = await executeTool(use.name, args);
       const resultPayload = result.ok
         ? JSON.stringify(result.data)
         : JSON.stringify({ error: result.error });
       const invalidatesBoard =
-        result.ok && SLOT_MUTATION_TOOLS.has(use.name as never);
+        result.ok && STATE_MUTATION_TOOLS.has(use.name as never);
       onEvent({
         type: 'tool_result',
         tool_use_id: use.id,
@@ -178,7 +161,6 @@ export async function runAgentTurn(opts: RunAgentTurnOptions): Promise<void> {
     appendTurn(conversation.id, 'tool', toolResultBlocks);
   }
 
-  // Hit the cap — persist a final assistant note and surface an error event.
   appendTurn(conversation.id, 'assistant', [
     {
       type: 'text',

@@ -4,7 +4,7 @@ import {
   getLastImports,
   getLastPlaylistImports,
 } from '../../../lib/youtube-import';
-import { TopNav } from '../../../components/issue/TopNav';
+import { TopNav } from '../../../components/TopNav';
 import { Kicker } from '../../../components/ui/Kicker';
 import { Rule } from '../../../components/ui/Rule';
 import { YouTubeImportButton } from '../../../components/YouTubeImportButton';

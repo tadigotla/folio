@@ -1,85 +1,110 @@
 import type Anthropic from '@anthropic-ai/sdk';
-import { getIssueSlots, getInboxPool, getIssueById } from '../issues';
+import { getDb } from '../db';
 import { getClusterSummaries } from '../taste-read';
-import { formatDuration } from '../time';
+import { listPlaylists } from '../playlists';
+import { getMutedClusterIdsToday } from '../mutes';
+import { todayLocal } from '../time';
 
 /**
- * Builds the per-turn snapshot block: current draft state, inbox digest,
- * taste-cluster summary. Returned as a cache-controlled user message so the
- * snapshot itself is cached for the duration of a multi-turn tool loop.
+ * Builds the per-turn snapshot block for the curation companion: consumption
+ * counts, fresh-arrival count, top taste clusters by weight, and the user's
+ * playlists. Returned as a cache-controlled user message so the snapshot
+ * itself is cached for the duration of a multi-turn tool loop.
  */
-export function buildSnapshotBlock(issueId: number): Anthropic.TextBlockParam {
-  const issue = getIssueById(issueId);
-  const slots = getIssueSlots(issueId);
-  const pool = getInboxPool(issueId);
+export function buildSnapshotBlock(): Anthropic.TextBlockParam {
+  const db = getDb();
+  const today = todayLocal();
+
+  const consumption = db
+    .prepare(
+      `SELECT status, COUNT(*) AS n FROM consumption GROUP BY status`,
+    )
+    .all() as Array<{ status: string; n: number }>;
+  const counts: Record<string, number> = Object.create(null);
+  for (const r of consumption) counts[r.status] = r.n;
+
+  const freshRow = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM consumption
+        WHERE status = 'inbox' AND status_changed_at >= datetime('now', '-24 hours')`,
+    )
+    .get() as { n: number };
+
+  const inProgress = db
+    .prepare(
+      `SELECT v.id, v.title, ch.name AS channel_name, c.last_position_seconds
+         FROM consumption c
+         JOIN videos v ON v.id = c.video_id
+         JOIN channels ch ON ch.id = v.channel_id
+        WHERE c.status = 'in_progress'
+        ORDER BY COALESCE(c.last_viewed_at, c.status_changed_at) DESC
+        LIMIT 5`,
+    )
+    .all() as Array<{
+    id: string;
+    title: string;
+    channel_name: string;
+    last_position_seconds: number | null;
+  }>;
+
   const clusters = getClusterSummaries();
+  const muted = getMutedClusterIdsToday();
+  const playlists = listPlaylists();
 
   const lines: string[] = [];
-  lines.push('### Current draft');
+  lines.push(`### Today (${today})`);
   lines.push(
-    `Issue ${issueId}${issue?.title ? ` — "${issue.title}"` : ''} — ${slots.length} of 14 slots filled.`,
-  );
-
-  const cover = slots.find(
-    (s) => s.slot_kind === 'cover' && s.slot_index === 0,
+    `Pool: ${counts['inbox'] ?? 0} inbox · ${counts['saved'] ?? 0} saved · ${counts['in_progress'] ?? 0} in-progress · ${counts['archived'] ?? 0} archived · ${counts['dismissed'] ?? 0} dismissed.`,
   );
   lines.push(
-    `Cover: ${cover ? `"${cover.title}" — ${cover.channel_name}` : '(empty)'}`,
+    `Fresh in the last 24h: ${freshRow.n} new inbox row${freshRow.n === 1 ? '' : 's'}.`,
   );
-
-  const featured = [0, 1, 2].map((i) =>
-    slots.find((s) => s.slot_kind === 'featured' && s.slot_index === i),
-  );
-  lines.push('Featured:');
-  featured.forEach((s, i) => {
-    lines.push(
-      `  [${i}] ${s ? `"${s.title}" — ${s.channel_name}` : '(empty)'}`,
-    );
-  });
-
-  const briefs = Array.from({ length: 10 }, (_, i) =>
-    slots.find((s) => s.slot_kind === 'brief' && s.slot_index === i),
-  );
-  lines.push('Briefs:');
-  briefs.forEach((s, i) => {
-    lines.push(
-      `  [${i}] ${s ? `"${s.title}" — ${s.channel_name}` : '(empty)'}`,
-    );
-  });
 
   lines.push('');
-  lines.push('### Pool digest');
-  lines.push(
-    `${pool.length} video${pool.length === 1 ? '' : 's'} available in the inbox + saved pool (not yet placed on this issue).`,
-  );
-  // Sample — the agent should not rely on this list, use search_pool / rank_by_theme.
-  const sample = pool.slice(0, 8);
-  for (const p of sample) {
-    const dur = formatDuration(p.duration_seconds);
-    lines.push(
-      `- ${p.id} · "${p.title}" — ${p.channel_name}${dur ? ` (${dur})` : ''}`,
-    );
-  }
-  if (pool.length > sample.length) {
-    lines.push(`… and ${pool.length - sample.length} more.`);
+  lines.push('### In progress');
+  if (inProgress.length === 0) {
+    lines.push('(nothing currently in progress)');
+  } else {
+    for (const v of inProgress) {
+      const pos =
+        v.last_position_seconds != null
+          ? ` @ ${Math.floor(v.last_position_seconds)}s`
+          : '';
+      lines.push(`- ${v.id} · "${v.title}" — ${v.channel_name}${pos}`);
+    }
   }
 
   lines.push('');
-  lines.push('### Taste clusters (active)');
+  lines.push('### Taste clusters (active, sorted by weight)');
   if (clusters.active.length === 0) {
     lines.push(
       'No active clusters. Run `just taste-build` to populate the map.',
     );
   } else {
-    for (const c of clusters.active) {
+    const sorted = [...clusters.active].sort((a, b) => b.weight - a.weight);
+    for (const c of sorted) {
       const label = c.label ?? '(unlabeled)';
       const top = c.preview
         .slice(0, 3)
         .map((p) => `"${p.title}"`)
         .join(', ');
+      const mutedTag = muted.has(c.id) ? ' · muted today' : '';
       lines.push(
-        `- #${c.id} ${label} — weight ${c.weight.toFixed(1)}, ${c.memberCount} members${top ? `; top: ${top}` : ''}`,
+        `- #${c.id} ${label} — weight ${c.weight.toFixed(1)}, ${c.memberCount} members${mutedTag}${top ? `; top: ${top}` : ''}`,
       );
+    }
+  }
+
+  lines.push('');
+  lines.push('### Playlists');
+  if (playlists.length === 0) {
+    lines.push('(no playlists yet)');
+  } else {
+    for (const p of playlists.slice(0, 10)) {
+      lines.push(`- #${p.id} "${p.name}" — ${p.item_count} item${p.item_count === 1 ? '' : 's'}`);
+    }
+    if (playlists.length > 10) {
+      lines.push(`… and ${playlists.length - 10} more.`);
     }
   }
 

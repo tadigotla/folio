@@ -133,11 +133,6 @@ export type VideoWithConsumption = Video & {
   last_position_seconds: number | null;
 };
 
-export type VideoWithSection = VideoWithConsumption & {
-  section_id: number | null;
-  section_name: string | null;
-};
-
 const SELECT_VIDEO_WITH_CONSUMPTION = `
   SELECT v.*,
          c.status, c.status_changed_at, c.last_viewed_at, c.last_position_seconds,
@@ -156,25 +151,6 @@ export function getInboxVideos(): VideoWithConsumption[] {
         ORDER BY v.discovered_at DESC`,
     )
     .all() as VideoWithConsumption[];
-}
-
-export function getInboxVideosWithSection(): VideoWithSection[] {
-  const db = getDb();
-  return db
-    .prepare(
-      `SELECT v.*,
-              c.status, c.status_changed_at, c.last_viewed_at, c.last_position_seconds,
-              ch.name AS channel_name,
-              ch.section_id AS section_id,
-              s.name AS section_name
-         FROM videos v
-         JOIN consumption c ON c.video_id = v.id
-         JOIN channels ch   ON ch.id      = v.channel_id
-    LEFT JOIN sections s ON s.id = ch.section_id
-        WHERE c.status = 'inbox'
-        ORDER BY v.discovered_at DESC`,
-    )
-    .all() as VideoWithSection[];
 }
 
 export function getLibraryVideos(): {

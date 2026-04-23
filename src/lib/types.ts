@@ -5,14 +5,6 @@ export interface Channel {
   subscribed: number;
   first_seen_at: string;
   last_checked_at: string;
-  section_id: number | null;
-}
-
-export interface Section {
-  id: number;
-  name: string;
-  sort_order: number;
-  created_at: string;
 }
 
 export interface Tag {
@@ -63,26 +55,6 @@ export interface VideoProvenance {
   source_ref: string;
   imported_at: string;
   signal_weight: number;
-}
-
-export type IssueStatus = 'draft' | 'published';
-
-export interface Issue {
-  id: number;
-  status: IssueStatus;
-  title: string | null;
-  created_at: string;
-  published_at: string | null;
-}
-
-export type SlotKind = 'cover' | 'featured' | 'brief';
-
-export interface IssueSlot {
-  issue_id: number;
-  slot_kind: SlotKind;
-  slot_index: number;
-  video_id: string;
-  assigned_at: string;
 }
 
 export type ImportStatus = 'running' | 'ok' | 'error';
@@ -149,7 +121,7 @@ export type TurnRole = 'user' | 'assistant' | 'tool';
 
 export interface Conversation {
   id: number;
-  issue_id: number;
+  scope_date: string;
   created_at: string;
 }
 
