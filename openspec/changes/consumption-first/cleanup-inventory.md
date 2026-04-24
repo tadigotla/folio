@@ -1,8 +1,8 @@
 # Cleanup Inventory — Magazine Teardown
 
-_Last completed: 2026-04-23 (phase 5 / `overnight-maintenance` shipped — nightly pipeline + discovery substrate; phase 6a (description-graph) was absorbed into phase 5, so the remaining phase 6 is **active discovery only**: `search_youtube` agent tool + `/inbox` Proposed rail + approve/dismiss endpoints + `YOUTUBE_API_KEY`.)_
+_Last completed: 2026-04-24 (phase 5 / `overnight-maintenance` shipped and archived to `openspec/changes/archive/2026-04-24-overnight-maintenance/` — nightly pipeline verified end-to-end: two full runs against the live corpus, launchd install/uninstall round-trip, all substrate invariants confirmed. Phase 6a (description-graph) was absorbed into phase 5, so the remaining phase 6 is **active discovery only**: `search_youtube` agent tool + `/inbox` Proposed rail + approve/dismiss endpoints + `YOUTUBE_API_KEY`.)_
 
-_Prior: 2026-04-23 (phase 4 / `magazine-teardown` shipped — see `openspec/changes/archive/2026-04-23-magazine-teardown/`)._
+_Prior: 2026-04-23 (phase 5 code + docs shipped unverified; phase 4 / `magazine-teardown` shipped — see `openspec/changes/archive/2026-04-23-magazine-teardown/`)._
 
 This file is the authoritative checklist for everything the magazine framing touches in the codebase, the database, the docs, and the OpenSpec tree. It is the ground truth for **phase 4 (`magazine-teardown`)** and a reference for phases 1–3 to avoid touching surfaces that are about to go away.
 

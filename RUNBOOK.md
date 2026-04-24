@@ -611,6 +611,13 @@ digest in `notes` that `/` renders above `RightNowRail`.
 
 The job never calls Anthropic. `ANTHROPIC_API_KEY` can be unset.
 
+`scripts/nightly.ts` loads `.env.local` via `process.loadEnvFile()` before
+importing anything else, so `YOUTUBE_OAUTH_CLIENT_{ID,SECRET}`,
+`OPENAI_API_KEY`, and friends are available whether the job runs under
+`just nightly` from a shell or under launchd (which does not inherit your
+shell env). Keep secrets in `.env.local`; do not re-declare them in the
+plist.
+
 ### Install / uninstall
 
 - `just nightly` — run once, on demand. Equivalent to `npx tsx scripts/nightly.ts`.
