@@ -149,6 +149,38 @@ Without `ANTHROPIC_API_KEY`, `/api/agent/status` returns
 of the app is unaffected. See `RUNBOOK.md` § "Curation agent" for setup,
 cost expectations, and privacy posture.
 
+### Overnight maintenance (`src/lib/nightly/`, `src/lib/discovery/`, `scripts/nightly.ts`, `ops/com.folio.nightly.plist.tmpl`)
+
+A single local-only nightly pipeline installed via launchd (opt-in; verbs
+`just nightly{,-install,-uninstall}`). `src/lib/nightly/run.ts` is the only
+place the sequential 7-step orchestrator runs: migrate → OAuth import
+(`importLikes` + `importSubscriptions`) → transcripts → enrich → embed →
+recluster → description-graph. Per-step failures are captured in
+`nightly_runs.counts.steps` and `nightly_runs.last_error` but do not abort
+later steps. `runNightly` returns early with `status = 'skipped'` when no
+`oauth_tokens` row exists, with the notes pointing at
+`/settings/youtube`. The pipeline has **no Anthropic dependency** — it runs
+cleanly with `ANTHROPIC_API_KEY` unset. Step 6 (recluster) is incremental
+by default: it assigns newly-embedded videos to their nearest active
+cluster, recomputes affected centroids, and only falls through to
+`rebuildClusters()` if max centroid drift exceeds `RECLUSTER_REBUILD_DRIFT`
+(default `0.20`). `src/lib/nightly/digest.ts` writes exactly one
+`nightly_runs` row per invocation with a ≤140-char `notes` sentence;
+`src/lib/nightly/read.ts#getLatestDigest` is the **only** reader and
+surfaces the row to `<SinceLastVisit />` on `/` when the run is `ok` and
+within 36 hours. `src/lib/discovery/description-graph.ts` parses YouTube
+links, `UC…` channel ids, and `@handle` mentions from descriptions +
+transcripts of `consumption.status IN ('saved','in_progress')` videos;
+`src/lib/discovery/score.ts` scores each candidate as
+`clusterCosine × clusterWeight × sourceFreshness` against active clusters;
+`src/lib/discovery/candidates.ts` is the **single legal mutation path**
+for `discovery_candidates` / `discovery_rejections` (idempotent on
+`(target_id, source_video_id, source_kind)`). V1 stages rows but has **no
+active reader** — no `/inbox` Proposed rail, no approve/dismiss API, no
+`search_youtube` agent tool; phase 6 owns those surfaces. See
+`RUNBOOK.md` §§ "Overnight maintenance" and "Discovery candidates
+(substrate)" for install/inspection.
+
 ### Time handling (`src/lib/time.ts`)
 
 All timestamps are stored as UTC ISO 8601. Display is `America/New_York` (Tampa). **Every date conversion goes through this module** — use `toLocal`, `toLocalDateTime`, `relativeTime`, `formatDuration`, and do not call `date-fns-tz` directly elsewhere.
@@ -199,7 +231,7 @@ Per-feature specs and in-flight change proposals live in `openspec/` (`specs/` a
 ## Operational invariants
 
 This project maintains:
-- `justfile` with verbs: `dev`, `down`, `status`, `logs`, `test`, `seed`, `fetch`, `backup-db`, `cron-install`, `cron-uninstall`.
+- `justfile` with verbs: `dev`, `down`, `status`, `logs`, `test`, `seed`, `fetch`, `backup-db`, `cron-install`, `cron-uninstall`, `nightly`, `nightly-install`, `nightly-uninstall`.
 - `RUNBOOK.md` describing services, ports, environments, troubleshooting.
 
 **Invariant:** any change to launch/deploy/config — `Dockerfile`,

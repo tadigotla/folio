@@ -69,6 +69,56 @@ taste-build:
 taste-cluster:
     npx tsx scripts/taste/cluster.ts
 
+# Run the overnight maintenance pipeline once, on demand.
+# Same entrypoint launchd fires at NIGHTLY_HOUR (default 03:00). Logs to
+# stdout when run by hand; launchd redirects to ~/Library/Logs/folio-nightly.log.
+nightly:
+    npx tsx scripts/nightly.ts
+
+# Install the launchd agent that runs `just nightly` every day at NIGHTLY_HOUR
+# (default 03:00). Idempotent — re-running rewrites the plist with the current
+# repo path, so `just nightly-install` from a moved repo updates the job.
+nightly-install:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    repo_path="$(pwd)"
+    hour="${NIGHTLY_HOUR:-3}"
+    plist_src="ops/com.folio.nightly.plist.tmpl"
+    plist_dst="$HOME/Library/LaunchAgents/com.folio.nightly.plist"
+    mkdir -p "$HOME/Library/LaunchAgents"
+    mkdir -p "$HOME/Library/Logs"
+    sed \
+      -e "s|{{ '{{' }}REPO_PATH{{ '}}' }}|$repo_path|g" \
+      -e "s|{{ '{{' }}HOUR{{ '}}' }}|$hour|g" \
+      -e "s|{{ '{{' }}HOME{{ '}}' }}|$HOME|g" \
+      "$plist_src" > "$plist_dst"
+    if launchctl list | grep -q com.folio.nightly; then
+      launchctl unload "$plist_dst" >/dev/null 2>&1 || true
+    fi
+    launchctl load -w "$plist_dst"
+    echo "Installed com.folio.nightly at hour $hour (repo: $repo_path)."
+    echo "Logs: $HOME/Library/Logs/folio-nightly.log"
+
+# Remove the launchd agent. Safe to run when nothing is installed.
+nightly-uninstall:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    plist_dst="$HOME/Library/LaunchAgents/com.folio.nightly.plist"
+    had_something=0
+    if launchctl list | grep -q com.folio.nightly; then
+      launchctl unload "$plist_dst" >/dev/null 2>&1 || true
+      had_something=1
+    fi
+    if [ -f "$plist_dst" ]; then
+      rm -f "$plist_dst"
+      had_something=1
+    fi
+    if [ "$had_something" -eq 0 ]; then
+      echo "nothing to uninstall — com.folio.nightly not loaded and no plist on disk."
+    else
+      echo "Uninstalled com.folio.nightly."
+    fi
+
 # Trigger a YouTube import via the running dev server.
 # KIND is one of: likes | subscriptions | playlist
 # For KIND=playlist, also pass ID=<playlist_id>

@@ -73,7 +73,7 @@
 - [x] 8.5 Hit in a browser: `/compose`, `/issues`, `/issues/1`, `/section/science`, `/sections`. Every page returns 404. _(all 404.)_
 - [x] 8.6 `curl -s http://localhost:6060/api/issues`, `curl -s http://localhost:6060/api/issues/1`, `curl -s http://localhost:6060/api/sections` — all return 404. _(all 404. `/api/channels/section` also 404.)_
 - [x] 8.7 Open the chat panel (wherever phase-3 landed it). Send a message. Verify: a `conversations` row is created with today's `scope_date`, turns accumulate, the Anthropic response streams in. Send a second message later in the same day; verify no new conversation row is created. _(`/chat` mounts the panel. POSTed two messages to `/api/agent/message`: first inserted `conversations(scope_date='2026-04-23')` and grew the turn count from 0 → 2; second appended to the same conversation (turn count 2 → 4) without creating a new row. SSE stream emitted `delta` + `done` events both times. The pre-migration `2026-04-22` conversation row is preserved alongside.)_
-- [ ] 8.8 The user (Hari) opens `/` and confirms the app looks and feels like the consumption room it's supposed to be. Ask for the sign-off comment in this task's commit or PR before archiving.
+- [x] 8.8 The user (Hari) opens `/` and confirms the app looks and feels like the consumption room it's supposed to be. Ask for the sign-off comment in this task's commit or PR before archiving. _(signed off in chat 2026-04-23: "the product looks good".)_
 
 ## 9. Archive & cleanup
 

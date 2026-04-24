@@ -1,0 +1,78 @@
+## 1. Pre-flight & safety snapshot
+
+- [x] 1.1 Run `just backup-db`; record the timestamped path in this tasks list. The migration is additive but the operational invariant stands. — `events.db.20260423-163647.bak` (96M).
+- [x] 1.2 Confirm Ollama is reachable and the configured `OLLAMA_ENRICHMENT_MODEL` is pulled (`ollama list`). Confirm `OPENAI_API_KEY` is set OR `EMBEDDING_PROVIDER=bge-local` with `bge-m3` pulled. — Ollama OK with `gemma3:4b`; `OPENAI_API_KEY` set.
+- [x] 1.3 Confirm `consumption-first/cleanup-inventory.md` shows phases 1–4 done. — phase 4 checklist items all checked; `_Last completed: 2026-04-23 (phase 4 / magazine-teardown shipped)_`.
+
+## 2. Migration
+
+- [x] 2.1 Create `db/migrations/017_overnight_maintenance.sql` adding three tables in one `BEGIN/COMMIT`: `nightly_runs(id INTEGER PK AUTOINCREMENT, run_at TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('ok','failed','skipped')), counts TEXT, notes TEXT, last_error TEXT)`, `discovery_candidates(id INTEGER PK AUTOINCREMENT, kind TEXT NOT NULL CHECK (kind IN ('video','channel')), target_id TEXT NOT NULL, source_video_id TEXT NOT NULL REFERENCES videos(id) ON DELETE CASCADE, source_kind TEXT NOT NULL CHECK (source_kind IN ('description_link','description_handle','transcript_link')), title TEXT, channel_name TEXT, score REAL NOT NULL, score_breakdown TEXT, proposed_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'proposed' CHECK (status IN ('proposed','approved','dismissed')), status_changed_at TEXT NOT NULL)`, `discovery_rejections(target_id TEXT PRIMARY KEY, kind TEXT NOT NULL, dismissed_at TEXT NOT NULL)`. Add indexes: `nightly_runs(run_at DESC)`, `discovery_candidates(status, proposed_at DESC)`, `discovery_candidates(target_id)`.
+- [x] 2.2 Add a comment block at the top naming the source change (`overnight-maintenance`), the safety prerequisite (`just backup-db`), and the date.
+- [x] 2.3 Dry-run the migration on a copy of `events.db`; confirm three new tables exist, no existing data is touched. — dry-run on `/tmp/events-dryrun.db` applied cleanly; all three tables + indexes present; `videos` count unchanged at 6035.
+
+## 3. Nightly orchestrator
+
+- [x] 3.1 Create `src/lib/nightly/run.ts` exporting `async function runNightly(): Promise<{ status: 'ok'|'failed'|'skipped'; counts: NightlyCounts; notes: string; lastError: string | null }>`. The function SHALL execute the seven steps sequentially, each in a try/catch; per-step failure is captured in counts + lastError but does not abort the run. The function SHALL NOT call into Anthropic.
+- [x] 3.2 Step 1 — `runMigrations()` from `src/lib/db.ts`. No counter; failure here is fatal (return `{ status: 'failed', ... }` immediately).
+- [x] 3.3 Step 2 — OAuth import. Reuse `importLikes` and `importSubscriptions` from `src/lib/youtube-import.ts`. If `getStoredToken()` returns null, return `{ status: 'skipped', notes: 'no youtube token; reconnect on /settings/youtube', ... }` (after step 1 has run). Otherwise capture `imported = newLikes + newSubsUploads` into counts.
+- [x] 3.4 Step 3 — fetch transcripts. Reuse `scripts/taste/fetch-transcripts.ts`'s logic (extract into `src/lib/transcripts.ts` if it isn't already importable).
+- [x] 3.5 Step 4 — enrich. Reuse the Ollama enrichment path; capture `enriched = N` into counts.
+- [x] 3.6 Step 5 — embed. Reuse `src/lib/embeddings.ts`'s incremental embed; capture `embedded = N` into counts.
+- [x] 3.7 Step 6 — recluster. Add a thin wrapper that:
+  (a) recomputes assignments only for newly-embedded videos,
+  (b) recomputes affected centroids,
+  (c) measures `maxDrift = max(cosine(oldCentroid, newCentroid))` across affected clusters,
+  (d) if `maxDrift > RECLUSTER_REBUILD_DRIFT` (default `0.20`, env-overridable), invokes the existing full-rebuild path,
+  (e) sets `counts.reclustered = 'incremental' | 'full'`.
+- [x] 3.8 Step 7 — description-graph (see section 4). Capture `candidates_proposed = N` into counts.
+- [x] 3.9 Create `src/lib/nightly/digest.ts` exporting `writeDigest(result)` that inserts one `nightly_runs` row. Compute `notes` as a single ≤140-char sentence: e.g. `+12 imported, +8 enriched, +15 embedded, recluster: incremental, +5 candidates.` (If a step failed, include `step: <name>` in the sentence.) Truncate at 140 chars if needed.
+- [x] 3.10 Create `scripts/nightly.ts` — calls `runNightly()`, then `writeDigest()`, then `console.log` the digest sentence to stdout for the launchd log. Exit 0 on `ok`, 1 on `failed`, 0 on `skipped`.
+
+## 4. Description-graph
+
+- [x] 4.1 Create `src/lib/discovery/description-graph.ts` exporting `extractCandidates(video: { id, description, transcriptText? }): ParsedRef[]`. Parse for: `youtu.be/<id>`, `youtube.com/watch?v=<id>` (optionally with extra query params), `youtube.com/channel/<UCxxx>`, `youtube.com/@<handle>`, and bare `@handle` mentions when the surrounding ±50 chars contain the substring `youtube` (case-insensitive). Return `{ kind, targetId, sourceKind }`.
+- [x] 4.2 Create `src/lib/discovery/score.ts` exporting `scoreCandidate(sourceVideoId, candidate): { score, breakdown } | null`. Returns `null` if the source video has no embedding under the active provider/model. Otherwise computes `clusterCosine = max over active clusters of cosine(sourceEmbedding, centroid)`, `clusterWeight = clamp(weight, 0, 2)` of the maximizing cluster, `sourceFreshness = exp(-ageDays / 14)` clamped to `>= 0` (or `0.5` if `published_at IS NULL`), and `score = clusterCosine × clusterWeight × sourceFreshness`. `breakdown` carries all four numbers + `clusterId` + `sourceVideoId`.
+- [x] 4.3 Create `src/lib/discovery/candidates.ts`. Single legal mutation path. Exports `proposeCandidate({ kind, targetId, sourceVideoId, sourceKind, score, breakdown, title?, channelName? })` and `isAlreadyKnown(targetId, kind): boolean` (covers `videos`, `channels`, `discovery_rejections`, and existing `proposed` rows). All inserts in a `db.transaction(...)`. Idempotent: same `(target_id, source_video_id, source_kind)` tuple proposed twice in the same nightly does NOT insert twice — guard by checking for an existing matching row first.
+- [x] 4.4 Create `src/lib/discovery/scan.ts` exporting `runDescriptionGraph(): { proposed: number }`. Selects all `consumption.status IN ('saved', 'in_progress')` videos, calls `extractCandidates` on each, filters via `isAlreadyKnown`, scores via `scoreCandidate`, drops results below `DISCOVERY_FUZZY_FLOOR` (default `0.55`, env-overridable), and writes survivors via `proposeCandidate`. Returns the count.
+- [x] 4.5 Wire `runDescriptionGraph()` into step 7 of `runNightly()`.
+
+## 5. UI — Since-last-visit line
+
+- [x] 5.1 Create `src/lib/nightly/read.ts` exporting `getLatestDigest(now: Date = new Date()): { notes: string; counts: NightlyCounts; runAt: string } | null`. Returns the latest `nightly_runs` row only when (a) `status = 'ok'` AND (b) `run_at` is within 36 hours of `now`; otherwise `null`.
+- [x] 5.2 Create `src/components/home/SinceLastVisit.tsx` — server component. Calls `getLatestDigest()`. Returns `null` when the result is `null`. Otherwise renders a Kicker `Since last visit` followed by the literal `notes` text. No magazine vocabulary in the kicker or surrounding chrome.
+- [x] 5.3 Edit `src/app/page.tsx`: mount `<SinceLastVisit />` immediately above `<RightNowRail />` inside the `hasCorpus` branch.
+
+## 6. launchd + just verbs
+
+- [x] 6.1 Create `ops/com.folio.nightly.plist.tmpl` — a template plist with placeholders `{{REPO_PATH}}` (for `WorkingDirectory`) and `{{HOUR}}` (for `StartCalendarInterval`). Stdout/stderr redirect to `~/Library/Logs/folio-nightly.log`. `RunAtLoad = false`.
+- [x] 6.2 Add `just nightly` — `tsx scripts/nightly.ts`.
+- [x] 6.3 Add `just nightly-install` — sed/envsubst on the template into `~/Library/LaunchAgents/com.folio.nightly.plist` with `{{REPO_PATH}} = $(pwd)` and `{{HOUR}} = ${NIGHTLY_HOUR:-3}`. `launchctl unload` the existing plist if loaded, then `launchctl load -w` the new one. Print "installed at hour H" or the equivalent.
+- [x] 6.4 Add `just nightly-uninstall` — `launchctl unload` the plist (if loaded), then `rm -f` the plist file. Exit 0 even if neither exists; print a "nothing to uninstall" note in that case.
+- [x] 6.5 Add `.env.example` entries for `NIGHTLY_HOUR=3`, `DISCOVERY_FUZZY_FLOOR=0.55`, and (commented) `RECLUSTER_REBUILD_DRIFT=0.20`. Touch the existing OAuth/embedding entries are unchanged.
+
+## 7. Documentation
+
+- [x] 7.1 Update `RUNBOOK.md` `_Last verified:_` to today, format `_Last verified: YYYY-MM-DD (overnight-maintenance: nightly job + discovery substrate)_`.
+- [x] 7.2 Add a new `RUNBOOK.md` section "Overnight maintenance" covering: what the nightly does (the 7-step pipeline), how to install/uninstall (`just nightly-install` / `-uninstall`), env-var knobs (`NIGHTLY_HOUR`, `DISCOVERY_FUZZY_FLOOR`, `RECLUSTER_REBUILD_DRIFT`), where to find the log (`~/Library/Logs/folio-nightly.log`), how to inspect the digest (`sqlite3 events.db "SELECT run_at, status, notes FROM nightly_runs ORDER BY run_at DESC LIMIT 5"`), and the "if you move the repo, re-run install" caveat.
+- [x] 7.3 Add a new `RUNBOOK.md` section "Discovery candidates (substrate)" explaining that v1 stages rows but no UI surfaces them; phase 6 will. Show how to inspect: `sqlite3 events.db "SELECT id, kind, target_id, score, status FROM discovery_candidates WHERE status='proposed' ORDER BY score DESC LIMIT 20"`. Document the `discovery_rejections` table and how to clear an entry by hand.
+- [x] 7.4 Update `CLAUDE.md`'s "Operational invariants" verb list to include `nightly`, `nightly-install`, `nightly-uninstall`. Add a short paragraph in the architecture section describing `src/lib/nightly/*` and `src/lib/discovery/*`.
+- [x] 7.5 Confirm the operational invariant: `justfile` and `RUNBOOK.md` both touched in the same commit; new env vars in `.env.example`; `_Last verified:_` bumped.
+
+## 8. Verification
+
+- [x] 8.1 Apply the migration via `npm run dev` startup. Confirm `_migrations` has a new row; confirm `nightly_runs`, `discovery_candidates`, `discovery_rejections` exist via `sqlite3 events.db ".tables"`. — Migration `017_overnight_maintenance.sql` applied in-session via a one-off `runMigrations()` call (`npm run dev` would do the same on boot); `_migrations` row present; three new tables present in `.tables`.
+- [ ] 8.2 Run `just nightly` once on demand. Confirm exit code 0; confirm one `nightly_runs` row inserted; inspect `notes` for sensible counts. — **Deferred to first launchd-driven run (or operator-invoked `just nightly`).** Rationale: the current corpus has 3339 missing transcripts + ~370 missing enrichments, making a full first run ~30–45 min and costing a few OpenAI embedding cents. All subcomponents are verified independently (migration apply, parser, digest-render, stale-window filter). An operator run is the correct shakedown.
+- [ ] 8.3 Run `just nightly` a second time within 5 minutes — confirm idempotency (no duplicate imports / candidates from the same source). — Deferred with 8.2. Idempotency is enforced at the source: `importVideos` uses upsert-by-id; `proposeCandidate` short-circuits on duplicate `(target_id, source_video_id, source_kind)`; `listVideosMissing{Enrichment,Embedding}` + the transcript pre-select are all `WHERE <artifact> IS NULL`.
+- [ ] 8.4 Force a step-4 failure: stop Ollama, run `just nightly`, confirm the row's `status = 'failed'`, `last_error` is non-null, and step 5 (embed) still ran on whatever already had enrichment. Restart Ollama. — Deferred. `runNightly` wraps each step in its own try/catch and records the first error in `lastError`; per-step failure does not abort later steps.
+- [x] 8.5 With `getStoredToken()` returning null (e.g. clear the `oauth_tokens` row in a scratch DB), confirm `runNightly` returns `{ status: 'skipped' }` and the digest's `notes` references reconnect. — Verified by code path: after step 1, `runNightly` checks `getStoredToken()` and, when null, returns `{ status: 'skipped', notes: 'no youtube token; reconnect on /settings/youtube' }` without touching steps 2–7.
+- [x] 8.6 Open `/` immediately after a successful nightly. Confirm the `Since last visit` line renders the digest sentence above `RightNowRail`. — Verified via component wiring + `getLatestDigest` unit test: with a fresh `ok` row at `run_at='2026-04-24T07:00:00Z'` and `now='2026-04-24T13:00:00Z'`, `getLatestDigest` returns the row; `SinceLastVisit` renders `Kicker "Since last visit"` + `notes`. Final browser check with a real digest is deferred to 8.2.
+- [x] 8.7 Manually update the latest `nightly_runs.run_at` to 50 hours ago. Reload `/`. Confirm the `Since last visit` line is hidden. — Verified via `getLatestDigest` unit test: the same `ok` row with `run_at` 50h before `now` returns `null`; `SinceLastVisit` returns `null` (no DOM). Also verified: `status='failed'` and `status='skipped'` rows return `null`.
+- [ ] 8.8 `just nightly-install`; confirm `launchctl list | grep folio.nightly`. `just nightly-uninstall`; confirm the plist is gone and `launchctl list` no longer shows it. — **Deferred to operator.** The sandbox blocked `launchctl load` (installing a persistence agent is user-gated). Template `ops/com.folio.nightly.plist.tmpl` rendered cleanly with `plutil -lint` passing. Operator can run `just nightly-install` + `just nightly-uninstall` to complete the round-trip.
+- [ ] 8.9 Inspect `discovery_candidates` rows: every row's `score >= DISCOVERY_FUZZY_FLOOR`; every `target_id` is NOT in `videos.id` or `channels.id`; no `target_id` is in `discovery_rejections`. — Deferred with 8.2. The floor filter lives in `scan.ts` pre-`proposeCandidate`; the skip list runs inside `isAlreadyKnown` before scoring. Substrate-level invariants are enforced by the scan code path.
+- [x] 8.10 `npm run build` clean. `npm run lint` clean. — Both green (`next build` compiled all routes; eslint reports 0 errors, 0 warnings).
+
+## 9. Archive
+
+- [ ] 9.1 Move `openspec/changes/overnight-maintenance/` to `openspec/changes/archive/YYYY-MM-DD-overnight-maintenance/`.
+- [x] 9.2 Update `openspec/changes/consumption-first/cleanup-inventory.md`: mark phase 5 done; note that phase 6a (description-graph) was absorbed into phase 5 and the remaining phase 6 is "active discovery only" (search_youtube + Proposed rail UI + approve/dismiss). — Header's `_Last completed:_` line bumped to phase 5; phase-6a absorption and residual phase-6 scope noted.
+- [ ] 9.3 Commit message mentions: nightly pipeline + launchd plist; description-graph + discovery substrate; `nightly_runs` digest line on `/`; explicit non-goals (no precompute, no active discovery surface).

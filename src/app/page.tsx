@@ -6,6 +6,7 @@ import { Kicker } from '../components/ui/Kicker';
 import { RightNowRail } from '../components/home/RightNowRail';
 import { ContinueRail } from '../components/home/ContinueRail';
 import { ShelfRail } from '../components/home/ShelfRail';
+import { SinceLastVisit } from '../components/home/SinceLastVisit';
 
 export const dynamic = 'force-dynamic';
 
@@ -67,6 +68,7 @@ export default async function Home() {
 
       {hasCorpus && (
         <>
+          <SinceLastVisit />
           <RightNowRail />
           <ContinueRail />
           <ShelfRail />

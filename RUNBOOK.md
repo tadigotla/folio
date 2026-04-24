@@ -1,5 +1,5 @@
 # Runbook
-_Last verified: 2026-04-23 (magazine-teardown: issues/sections/compose dropped; conversations now per-day; `/chat` mounts the curation agent)_
+_Last verified: 2026-04-23 (overnight-maintenance: nightly job + discovery substrate)_
 
 ## Overview
 Folio — a personal, taste-aware consumption room for YouTube. Single-process
@@ -572,6 +572,113 @@ const nextConfig: NextConfig = {
 Swap `100.113.5.65` for your Tailscale IP / LAN hostname / whatever
 shows up in the warning the dev server logs on first request. Config
 changes are **not** hot-reloaded — you must restart the dev server.
+
+## Overnight maintenance
+
+A single local-only nightly job that runs the full ingest → enrich → embed →
+recluster → description-graph pipeline in one process. Opt-in via launchd;
+if you never install the agent, the rest of the app behaves as it does today.
+
+### What the nightly does
+
+`scripts/nightly.ts` runs seven steps sequentially:
+
+1. `runMigrations()` — applies any new `db/migrations/*.sql`.
+2. **OAuth import** — `importLikes()` + `importSubscriptions()`, the same
+   paths the `/settings/youtube` buttons call. If no `oauth_tokens` row
+   exists, the run exits early with `status = 'skipped'`.
+3. **Transcripts** — `fetchTranscript()` for every video without a row in
+   `video_transcripts`. Polite ~250–500ms jitter between requests.
+4. **Enrich** — Ollama summary + 3 topic tags for every video without a
+   row in `video_enrichment`.
+5. **Embed** — incremental embed for every video without a row in
+   `video_embeddings` under the active `(provider, model)`.
+6. **Recluster** — incremental: assign new embeddings to the nearest
+   active cluster, recompute affected centroids, and only trigger the full
+   `rebuildClusters()` path if max centroid drift exceeds
+   `RECLUSTER_REBUILD_DRIFT` (default 0.20).
+7. **Description-graph** — scan descriptions + transcripts of every
+   `consumption.status IN ('saved', 'in_progress')` video for YouTube
+   links, channel IDs, and `@handles`. Score each new candidate against the
+   active taste clusters; survivors at or above `DISCOVERY_FUZZY_FLOOR`
+   (default 0.55) are inserted into `discovery_candidates` with
+   `status = 'proposed'`.
+
+A per-step failure is captured in `nightly_runs.counts.steps` and
+`nightly_runs.last_error` but does not abort subsequent steps. Exactly one
+`nightly_runs` row is written per invocation, with a single-sentence
+digest in `notes` that `/` renders above `RightNowRail`.
+
+The job never calls Anthropic. `ANTHROPIC_API_KEY` can be unset.
+
+### Install / uninstall
+
+- `just nightly` — run once, on demand. Equivalent to `npx tsx scripts/nightly.ts`.
+- `just nightly-install` — generates `~/Library/LaunchAgents/com.folio.nightly.plist`
+  from `ops/com.folio.nightly.plist.tmpl`, templates the current repo path
+  and `NIGHTLY_HOUR` (default 3), then `launchctl load -w`s it. Idempotent —
+  safe to re-run (and required if you move the repo).
+- `just nightly-uninstall` — unloads and removes the plist. Safe to run
+  when nothing is installed.
+
+**If you move the repo, re-run `just nightly-install`.** The plist hard-codes
+`WorkingDirectory` and the `cd` inside `ProgramArguments`; moving the checkout
+silently breaks the job until it's regenerated.
+
+### Environment knobs
+
+| Var | Default | Effect |
+|---|---|---|
+| `NIGHTLY_HOUR` | `3` | Hour (0–23, local time) launchd fires the job. Read only at install time. |
+| `DISCOVERY_FUZZY_FLOOR` | `0.55` | Score floor for inserting a candidate. |
+| `RECLUSTER_REBUILD_DRIFT` | `0.20` | Centroid drift that flips step 6 from incremental to full. |
+| `YOUTUBE_SUBSCRIPTION_UPLOAD_LIMIT` | `25` | Pre-existing; caps uploads imported per subscription per run. |
+
+### Log and digest inspection
+
+- Launchd log: `~/Library/Logs/folio-nightly.log`. Contains both stdout
+  and stderr (one combined file).
+- Digest history:
+  ```bash
+  sqlite3 events.db "SELECT run_at, status, notes FROM nightly_runs ORDER BY run_at DESC LIMIT 5"
+  ```
+- Full structured counts for a single run:
+  ```bash
+  sqlite3 events.db "SELECT counts FROM nightly_runs ORDER BY run_at DESC LIMIT 1"
+  ```
+
+## Discovery candidates (substrate)
+
+Phase 5 of the consumption-first umbrella stages proposed imports but
+**does not surface them yet**. The `discovery_candidates` table
+accumulates rows that no UI reads; phase 6 owns the active discovery
+surfaces (`/inbox` "Proposed" rail, approve/dismiss API, `search_youtube`
+agent tool).
+
+### Inspect proposed candidates
+
+```bash
+sqlite3 events.db "SELECT id, kind, target_id, score, status FROM discovery_candidates WHERE status='proposed' ORDER BY score DESC LIMIT 20"
+```
+
+To see scoring provenance for one row:
+
+```bash
+sqlite3 events.db "SELECT score_breakdown FROM discovery_candidates WHERE id = 1"
+```
+
+### Rejection list
+
+`discovery_rejections(target_id PRIMARY KEY, kind, dismissed_at)` is the
+permanent dismiss list — the description-graph scan skips any `target_id`
+present here, forever. Phase 6's dismiss endpoint will append to this
+table; in phase 5 it stays empty.
+
+Clear a single entry by hand (e.g. if a target was rejected by mistake):
+
+```bash
+sqlite3 events.db "DELETE FROM discovery_rejections WHERE target_id = '<id>'"
+```
 
 ## Troubleshooting
 - **"Port 6060 in use"** — `just down`, or `lsof -i :6060` to see what's

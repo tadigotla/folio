@@ -1,6 +1,8 @@
 # Cleanup Inventory — Magazine Teardown
 
-_Last completed: 2026-04-23 (phase 4 / `magazine-teardown` shipped — see `openspec/changes/archive/2026-04-23-magazine-teardown/`)_
+_Last completed: 2026-04-23 (phase 5 / `overnight-maintenance` shipped — nightly pipeline + discovery substrate; phase 6a (description-graph) was absorbed into phase 5, so the remaining phase 6 is **active discovery only**: `search_youtube` agent tool + `/inbox` Proposed rail + approve/dismiss endpoints + `YOUTUBE_API_KEY`.)_
+
+_Prior: 2026-04-23 (phase 4 / `magazine-teardown` shipped — see `openspec/changes/archive/2026-04-23-magazine-teardown/`)._
 
 This file is the authoritative checklist for everything the magazine framing touches in the codebase, the database, the docs, and the OpenSpec tree. It is the ground truth for **phase 4 (`magazine-teardown`)** and a reference for phases 1–3 to avoid touching surfaces that are about to go away.
 
@@ -347,7 +349,7 @@ Phase 4's `tasks.md` must check all of the following before the change is archiv
 - [x] `CLAUDE.md` contains no references to the magazine lifecycle, editorial workspace, or editor-in-chief framing. _(replaced; only contextual / negation prose remains.)_
 - [x] `RUNBOOK.md` "Last verified" date updated; magazine sections removed; replacement sections present. _(date is `2026-04-23 (magazine-teardown: ...)`; editor-workspace/published-issues sections removed; Curation agent + Playlists + Home ranking rail sections present.)_
 - [x] `openspec/specs/editorial-workspace/` and `openspec/specs/issue-archive/` directories absent; `editorial-agent/` renamed to `curation-agent/` with rewritten content; `home-view/spec.md` rewritten. _(verified.)_
-- [ ] User has opened `/` and confirmed the app looks and feels like the consumption room it's supposed to be. _(pending operator sign-off — task 8.8.)_
+- [x] User has opened `/` and confirmed the app looks and feels like the consumption room it's supposed to be. _(operator sign-off 2026-04-23.)_
 
 ---
 
