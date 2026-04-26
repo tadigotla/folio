@@ -133,8 +133,12 @@ export function ChatPanel({ scopeDate }: Props) {
     if (!res.ok || !res.body) {
       let msg = `HTTP ${res.status}`;
       try {
-        const body = await res.json();
-        if (body && typeof body.error === 'string') msg = body.error;
+        const body = (await res.json()) as {
+          error?: string | { code: string; message: string };
+        };
+        if (typeof body.error === 'string') msg = body.error;
+        else if (body.error && typeof body.error === 'object')
+          msg = `${body.error.code}: ${body.error.message}`;
       } catch {
         /* ignore */
       }
@@ -208,27 +212,35 @@ export function ChatPanel({ scopeDate }: Props) {
       } else if (type === 'tool_result' && payload && typeof payload === 'object') {
         const p = payload as {
           tool_use_id: string;
-          name: string;
+          toolName: string;
           ok: boolean;
-          summary: string;
+          result?: unknown;
+          error?: { code: string; message: string; details?: unknown };
           invalidatesBoard: boolean;
         };
         if (p.invalidatesBoard) stateDirty = true;
+        const envelope: ToolTrace['result'] = p.ok
+          ? { ok: true, result: p.result }
+          : {
+              ok: false,
+              error: p.error ?? { code: 'internal', message: 'unknown error' },
+            };
         setLive((prev) => {
           if (!prev) return prev;
           return {
             ...prev,
             traces: prev.traces.map((t) =>
-              t.tool_use_id === p.tool_use_id
-                ? { ...t, result: { ok: p.ok, summary: p.summary } }
-                : t,
+              t.tool_use_id === p.tool_use_id ? { ...t, result: envelope } : t,
             ),
           };
         });
         if (p.invalidatesBoard) router.refresh();
       } else if (type === 'error' && payload && typeof payload === 'object') {
-        const { message } = payload as { message: string };
-        setError(message);
+        const p = payload as {
+          error?: { code: string; message: string };
+        };
+        if (p.error) setError(`${p.error.code}: ${p.error.message}`);
+        else setError('agent error');
       }
     }
   }, [composer, scopeDate, router]);
@@ -354,30 +366,23 @@ function collectTracesFor(
   }
   return uses.map((u) => {
     const r = results.get(u.id);
-    let summary = `${u.name} ran`;
-    let ok = true;
+    let envelope: ToolTrace['result'];
     if (r) {
       try {
-        const parsed = JSON.parse(r.content) as Record<string, unknown>;
-        if (r.is_error) {
-          ok = false;
-          const err = parsed['error'];
-          summary = `${u.name} → ${typeof err === 'string' ? err : 'error'}`;
-        } else {
-          const count = parsed['count'];
-          if (typeof count === 'number') {
-            summary = `${u.name} — ${count} hit${count === 1 ? '' : 's'}`;
-          }
-        }
+        const parsed = JSON.parse(r.content) as ToolTrace['result'];
+        envelope = parsed;
       } catch {
-        /* ignore */
+        envelope = {
+          ok: false,
+          error: { code: 'internal', message: 'unparseable tool result' },
+        };
       }
     }
     return {
       tool_use_id: u.id,
       name: u.name,
       args: u.input,
-      result: { ok, summary },
+      result: envelope,
     };
   });
 }

@@ -326,7 +326,14 @@ no draft binding; they are not freezable, only purgeable.
 Default model is `claude-sonnet-4-6`. Set `AGENT_MODEL=claude-opus-4-7` in
 `.env` for harder sessions (higher cost). Typical session cost:
 **$0.05–0.20** at Sonnet pricing with prompt caching enabled. A runaway
-tool loop is capped at `AGENT_MAX_TURNS` (default 10); worst case ~$0.50.
+tool loop is capped three ways: `AGENT_MAX_TURNS` (default 10),
+`AGENT_MAX_INPUT_TOKENS` (default 200000, set 0 to disable), and
+`AGENT_MAX_OUTPUT_TOKENS` (default 20000, set 0 to disable). Token caps
+are per-session (one `POST /api/agent/message`) and evaluated between
+loop iterations only — an in-flight turn is allowed to complete. When
+any cap fires the SSE stream emits a typed `error` event identifying
+the cap and the measured value, persists a final assistant turn
+flagging the cap, then closes.
 
 Prompt caching is enabled at two boundaries (system prompt + tool
 descriptions, and the per-turn consumption-home snapshot) so repeated
@@ -386,6 +393,29 @@ takes the turns with it. The next message that day starts fresh.
 
 The curation agent runs only while a user is on `/chat` and sends a
 message. No cron, no background workers, no `justfile` additions.
+
+## Tests
+
+`just test` runs the vitest suite. Coverage is **deliberately narrow**:
+exactly two modules.
+
+- `src/lib/consumption.ts` — every legal/illegal `setConsumptionStatus`
+  transition, `recordProgress` auto-promotion (`start` from inbox /
+  saved / archived), `tick`/`pause` writing `last_position_seconds`,
+  and `end` auto-archive plus position clear.
+- `src/lib/taste-edit.ts` — every transition exported from the module
+  (label, weight, reassign, merge, split, retire) on the happy path,
+  plus at least one `IllegalEditError` path per category and a
+  `ConcurrentEditError` path with a stale `expectedUpdatedAt`.
+
+Tests run against in-memory SQLite (`better-sqlite3` `:memory:`) with
+`runMigrations()` applied per-test via `setDbForTest()` in `src/lib/db.ts`.
+**No external services are contacted** — no Anthropic, no OpenAI, no
+YouTube. The on-disk `events.db` is never touched by the suite.
+
+Everything else in the repo is **uncovered by design**: ingestion,
+agent loop, tool executor, RSC pages, taste clustering, etc. Adding
+broader coverage requires a separate change proposal.
 
 ## Playlists
 

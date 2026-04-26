@@ -1,5 +1,11 @@
 import type Anthropic from '@anthropic-ai/sdk';
-import { getAnthropic, getAgentModel, getAgentMaxTurns } from './client';
+import {
+  getAnthropic,
+  getAgentModel,
+  getAgentMaxTurns,
+  getAgentMaxInputTokens,
+  getAgentMaxOutputTokens,
+} from './client';
 import { buildSystem } from './system-prompt';
 import { buildSnapshotBlock } from './snapshot';
 import { getToolsForRequest, executeTool, STATE_MUTATION_TOOLS } from './tools';
@@ -10,6 +16,7 @@ import {
   turnsToMessages,
 } from './turns';
 import type { TurnContentBlock } from '../types';
+import type { ToolResult } from './errors';
 
 export type AgentEvent =
   | { type: 'delta'; text: string }
@@ -22,12 +29,16 @@ export type AgentEvent =
   | {
       type: 'tool_result';
       tool_use_id: string;
-      name: string;
+      toolName: string;
       ok: boolean;
-      summary: string;
+      result?: unknown;
+      error?: { code: string; message: string; details?: unknown };
       invalidatesBoard: boolean;
     }
-  | { type: 'error'; message: string }
+  | {
+      type: 'error';
+      error: { code: string; message: string; details?: unknown };
+    }
   | { type: 'done'; messageId: string | null };
 
 export interface RunAgentTurnOptions {
@@ -66,6 +77,11 @@ export async function runAgentTurn(opts: RunAgentTurnOptions): Promise<void> {
   appendTurn(conversation.id, 'user', userBlocks);
 
   const maxTurns = getAgentMaxTurns();
+  const maxInputTokens = getAgentMaxInputTokens();
+  const maxOutputTokens = getAgentMaxOutputTokens();
+
+  let sessionInputTokens = 0;
+  let sessionOutputTokens = 0;
 
   for (let iter = 0; iter < maxTurns; iter++) {
     const history = getConversationTurnsByConversationId(conversation.id);
@@ -97,11 +113,18 @@ export async function runAgentTurn(opts: RunAgentTurnOptions): Promise<void> {
     let finalMessage: Anthropic.Message;
     try {
       finalMessage = await stream.finalMessage();
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      onEvent({ type: 'error', message: msg });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      onEvent({
+        type: 'error',
+        error: { code: 'upstream_unavailable', message },
+      });
+      onEvent({ type: 'done', messageId: null });
       return;
     }
+
+    sessionInputTokens += finalMessage.usage.input_tokens;
+    sessionOutputTokens += finalMessage.usage.output_tokens;
 
     const assistantBlocks = finalMessage.content
       .map(blockToContentBlock)
@@ -133,40 +156,75 @@ export async function runAgentTurn(opts: RunAgentTurnOptions): Promise<void> {
         name: use.name,
         args,
       });
-      const result = await executeTool(use.name, args);
-      const resultPayload = result.ok
-        ? JSON.stringify(result.data)
-        : JSON.stringify({ error: result.error });
+      const result: ToolResult = await executeTool(use.name, args);
       const invalidatesBoard =
         result.ok && STATE_MUTATION_TOOLS.has(use.name as never);
       onEvent({
         type: 'tool_result',
         tool_use_id: use.id,
-        name: use.name,
+        toolName: use.name,
         ok: result.ok,
-        summary:
-          result.summary ??
-          (result.ok
-            ? `${use.name} ok`
-            : `${use.name} → ${'error' in result ? result.error : 'error'}`),
+        ...(result.ok ? { result: result.result } : { error: result.error }),
         invalidatesBoard,
       });
       toolResultBlocks.push({
         type: 'tool_result',
         tool_use_id: use.id,
-        content: resultPayload,
+        content: JSON.stringify(result),
         is_error: !result.ok,
       });
     }
     appendTurn(conversation.id, 'tool', toolResultBlocks);
+
+    // Token-budget cap — evaluated between iterations only.
+    if (maxInputTokens > 0 && sessionInputTokens >= maxInputTokens) {
+      const message = `input-token cap reached: ${sessionInputTokens} >= ${maxInputTokens}`;
+      appendTurn(conversation.id, 'assistant', [
+        { type: 'text', text: `Stopped — ${message}.` },
+      ]);
+      onEvent({
+        type: 'error',
+        error: {
+          code: 'precondition_failed',
+          message,
+          details: { cap: 'AGENT_MAX_INPUT_TOKENS', limit: maxInputTokens, measured: sessionInputTokens },
+        },
+      });
+      onEvent({ type: 'done', messageId: null });
+      return;
+    }
+    if (maxOutputTokens > 0 && sessionOutputTokens >= maxOutputTokens) {
+      const message = `output-token cap reached: ${sessionOutputTokens} >= ${maxOutputTokens}`;
+      appendTurn(conversation.id, 'assistant', [
+        { type: 'text', text: `Stopped — ${message}.` },
+      ]);
+      onEvent({
+        type: 'error',
+        error: {
+          code: 'precondition_failed',
+          message,
+          details: { cap: 'AGENT_MAX_OUTPUT_TOKENS', limit: maxOutputTokens, measured: sessionOutputTokens },
+        },
+      });
+      onEvent({ type: 'done', messageId: null });
+      return;
+    }
   }
 
+  const capMessage = `max turns reached: ${maxTurns}`;
   appendTurn(conversation.id, 'assistant', [
     {
       type: 'text',
       text: `Stopped after ${maxTurns} tool-use iterations. If you'd like me to keep going, say so.`,
     },
   ]);
-  onEvent({ type: 'error', message: 'max turns reached' });
+  onEvent({
+    type: 'error',
+    error: {
+      code: 'precondition_failed',
+      message: capMessage,
+      details: { cap: 'AGENT_MAX_TURNS', limit: maxTurns },
+    },
+  });
   onEvent({ type: 'done', messageId: null });
 }

@@ -1,4 +1,5 @@
 import type Anthropic from '@anthropic-ai/sdk';
+import { z } from 'zod';
 import { getDb } from '../db';
 import { getClusterSummaries } from '../taste-read';
 import {
@@ -7,24 +8,24 @@ import {
   getActiveEmbeddingConfig,
 } from '../embeddings';
 import { cosineSim, normalize } from '../taste';
-import {
-  setConsumptionStatus,
-  IllegalTransitionError,
-} from '../consumption';
+import { setConsumptionStatus } from '../consumption';
 import {
   createPlaylist,
   addToPlaylist,
   removeFromPlaylist,
   reorderPlaylist,
-  PlaylistNotFoundError,
-  VideoNotFoundError,
-  DuplicateVideoInPlaylistError,
-  InvalidPositionError,
 } from '../playlists';
-import { setMuteToday, ClusterNotFoundError } from '../mutes';
+import { setMuteToday } from '../mutes';
 import { searchYoutube } from '../discovery/search';
 import { YouTubeApiKeyMissingError } from '../youtube-api';
 import { proposeCandidate, isAlreadyKnown } from '../discovery/candidates';
+import {
+  type ToolResult,
+  ok,
+  err,
+  mapToolError,
+  fromZodError,
+} from './errors';
 
 export const TOOL_NAMES = [
   'search_pool',
@@ -242,10 +243,6 @@ export function getToolsForRequest(): Anthropic.Tool[] {
   return tools;
 }
 
-export type ToolResult =
-  | { ok: true; data: unknown; summary?: string }
-  | { ok: false; error: string; summary?: string };
-
 // Tools whose success should prompt the client to refresh consumption-affecting
 // surfaces (rails, library, playlists). Used by the SSE adapter to flag
 // `invalidatesBoard` for backwards compat with the existing client.
@@ -260,6 +257,104 @@ export const STATE_MUTATION_TOOLS: ReadonlySet<ToolName> = new Set([
   'propose_import',
 ]);
 
+// --- Per-tool Zod input schemas ------------------------------------------
+
+const SearchPoolInput = z
+  .object({
+    query: z.string().optional(),
+    cluster_id: z.number().int().optional(),
+    limit: z.number().int().min(1).max(50).optional(),
+  })
+  .strict();
+
+const RankByThemeInput = z
+  .object({
+    theme: z.string().min(1),
+    limit: z.number().int().min(1).max(25).optional(),
+  })
+  .strict();
+
+const GetVideoDetailInput = z
+  .object({ video_id: z.string().min(1) })
+  .strict();
+
+const GetTasteClustersInput = z.object({}).strict();
+
+const CreatePlaylistInput = z
+  .object({
+    name: z.string().min(1),
+    description: z.string().optional(),
+  })
+  .strict();
+
+const AddToPlaylistInput = z
+  .object({
+    playlist_id: z.number().int(),
+    video_id: z.string().min(1),
+  })
+  .strict();
+
+const RemoveFromPlaylistInput = AddToPlaylistInput;
+
+const ReorderPlaylistInput = z
+  .object({
+    playlist_id: z.number().int(),
+    video_id: z.string().min(1),
+    position: z.number().int().min(1),
+  })
+  .strict();
+
+const TriageInboxInput = z
+  .object({
+    video_id: z.string().min(1),
+    action: z.enum(['save', 'archive', 'dismiss']),
+  })
+  .strict();
+
+const MuteClusterTodayInput = z
+  .object({ cluster_id: z.number().int() })
+  .strict();
+
+const ResurfaceInput = z.object({ video_id: z.string().min(1) }).strict();
+
+const SearchYoutubeInput = z
+  .object({
+    query: z.string().min(1),
+    channel_id: z.string().optional(),
+    max_results: z.number().int().min(1).max(25).optional(),
+  })
+  .strict();
+
+const ProposeImportInput = z
+  .object({
+    kind: z.enum(['video', 'channel']),
+    target_id: z.string().min(1),
+    title: z.string().optional(),
+    channel_name: z.string().optional(),
+    source_kind: z.enum([
+      'description_link',
+      'description_handle',
+      'transcript_link',
+    ]),
+  })
+  .strict();
+
+const TOOL_INPUT_SCHEMAS: Record<ToolName, z.ZodType<unknown>> = {
+  search_pool: SearchPoolInput,
+  rank_by_theme: RankByThemeInput,
+  get_video_detail: GetVideoDetailInput,
+  get_taste_clusters: GetTasteClustersInput,
+  create_playlist: CreatePlaylistInput,
+  add_to_playlist: AddToPlaylistInput,
+  remove_from_playlist: RemoveFromPlaylistInput,
+  reorder_playlist: ReorderPlaylistInput,
+  triage_inbox: TriageInboxInput,
+  mute_cluster_today: MuteClusterTodayInput,
+  resurface: ResurfaceInput,
+  search_youtube: SearchYoutubeInput,
+  propose_import: ProposeImportInput,
+};
+
 // --- search_pool ----------------------------------------------------------
 
 interface PoolSearchRow {
@@ -273,13 +368,9 @@ interface PoolSearchRow {
   cluster_label: string | null;
 }
 
-function execSearchPool(args: {
-  query?: string;
-  cluster_id?: number;
-  limit?: number;
-}): ToolResult {
+function execSearchPool(args: z.infer<typeof SearchPoolInput>): ToolResult {
   const db = getDb();
-  const limit = Math.min(Math.max(1, args.limit ?? 20), 50);
+  const limit = args.limit ?? 20;
   const q = args.query?.trim();
   const clusterId = args.cluster_id;
 
@@ -313,26 +404,21 @@ function execSearchPool(args: {
 
   const rows = db.prepare(sql).all(...params) as PoolSearchRow[];
 
-  return {
-    ok: true,
-    data: {
-      count: rows.length,
-      results: rows.map((r) => ({
-        video_id: r.id,
-        title: r.title,
-        channel: r.channel_name,
-        duration_seconds: r.duration_seconds,
-        published_at: r.published_at,
-        status: r.status,
-        cluster:
-          r.cluster_id != null
-            ? { id: r.cluster_id, label: r.cluster_label }
-            : null,
-      })),
-    },
-    summary:
-      `searched pool (${[q ? `"${q}"` : null, clusterId != null ? `cluster #${clusterId}` : null].filter(Boolean).join(', ') || 'no filter'}) — ${rows.length} hit${rows.length === 1 ? '' : 's'}`,
-  };
+  return ok({
+    count: rows.length,
+    results: rows.map((r) => ({
+      video_id: r.id,
+      title: r.title,
+      channel: r.channel_name,
+      duration_seconds: r.duration_seconds,
+      published_at: r.published_at,
+      status: r.status,
+      cluster:
+        r.cluster_id != null
+          ? { id: r.cluster_id, label: r.cluster_label }
+          : null,
+    })),
+  });
 }
 
 // --- rank_by_theme --------------------------------------------------------
@@ -345,13 +431,12 @@ interface EmbRow {
   duration_seconds: number | null;
 }
 
-async function execRankByTheme(args: {
-  theme: string;
-  limit?: number;
-}): Promise<ToolResult> {
+async function execRankByTheme(
+  args: z.infer<typeof RankByThemeInput>,
+): Promise<ToolResult> {
   const theme = args.theme.trim();
-  if (!theme) return { ok: false, error: 'theme must be non-empty' };
-  const limit = Math.min(Math.max(1, args.limit ?? 10), 25);
+  if (!theme) return err('validation', 'theme must be non-empty');
+  const limit = args.limit ?? 10;
 
   const db = getDb();
   const cfg = getActiveEmbeddingConfig();
@@ -363,12 +448,10 @@ async function execRankByTheme(args: {
     )
     .get(cfg.provider, cfg.model) as { n: number };
   if (sample.n === 0) {
-    return {
-      ok: false,
-      error: 'no_embedded_corpus',
-      summary:
-        `no videos embedded under active provider ${cfg.provider}/${cfg.model}`,
-    };
+    return err('precondition_failed', 'no_embedded_corpus', {
+      provider: cfg.provider,
+      model: cfg.model,
+    });
   }
 
   const [themeVec] = await embed([theme], cfg);
@@ -401,11 +484,7 @@ async function execRankByTheme(args: {
     .sort((a, b) => b.similarity - a.similarity)
     .slice(0, limit);
 
-  return {
-    ok: true,
-    data: { theme, count: scored.length, results: scored },
-    summary: `ranked ${scored.length} video${scored.length === 1 ? '' : 's'} by theme "${theme}"`,
-  };
+  return ok({ theme, count: scored.length, results: scored });
 }
 
 // --- get_video_detail -----------------------------------------------------
@@ -428,7 +507,9 @@ interface VideoDetailRow {
   is_fuzzy: number | null;
 }
 
-function execGetVideoDetail(args: { video_id: string }): ToolResult {
+function execGetVideoDetail(
+  args: z.infer<typeof GetVideoDetailInput>,
+): ToolResult {
   const db = getDb();
   const row = db
     .prepare(
@@ -451,36 +532,32 @@ function execGetVideoDetail(args: { video_id: string }): ToolResult {
     )
     .get(args.video_id) as VideoDetailRow | undefined;
   if (!row) {
-    return { ok: false, error: 'video_not_found', summary: `no video ${args.video_id}` };
+    return err('not_found', `no video ${args.video_id}`);
   }
   const transcript = row.transcript_text
     ? row.transcript_text.slice(0, 500)
     : null;
-  return {
-    ok: true,
-    data: {
-      video_id: row.id,
-      title: row.title,
-      channel: row.channel_name,
-      duration_seconds: row.duration_seconds,
-      published_at: row.published_at,
-      source_url: row.source_url,
-      summary: row.summary,
-      topic_tags: row.topic_tags ? row.topic_tags.split(',').map((s) => s.trim()) : [],
-      transcript_snippet: transcript,
-      consumption_status: row.consumption_status,
-      cluster:
-        row.cluster_id != null
-          ? {
-              id: row.cluster_id,
-              label: row.cluster_label,
-              similarity: row.cluster_similarity,
-              is_fuzzy: row.is_fuzzy === 1,
-            }
-          : null,
-    },
-    summary: `fetched detail for "${row.title}"`,
-  };
+  return ok({
+    video_id: row.id,
+    title: row.title,
+    channel: row.channel_name,
+    duration_seconds: row.duration_seconds,
+    published_at: row.published_at,
+    source_url: row.source_url,
+    summary: row.summary,
+    topic_tags: row.topic_tags ? row.topic_tags.split(',').map((s) => s.trim()) : [],
+    transcript_snippet: transcript,
+    consumption_status: row.consumption_status,
+    cluster:
+      row.cluster_id != null
+        ? {
+            id: row.cluster_id,
+            label: row.cluster_label,
+            similarity: row.cluster_similarity,
+            is_fuzzy: row.is_fuzzy === 1,
+          }
+        : null,
+  });
 }
 
 // --- get_taste_clusters ---------------------------------------------------
@@ -499,97 +576,48 @@ function execGetTasteClusters(): ToolResult {
       channel: p.channelName,
     })),
   }));
-  return {
-    ok: true,
-    data: { count: clusters.length, clusters },
-    summary: `fetched ${clusters.length} active cluster${clusters.length === 1 ? '' : 's'}`,
-  };
+  return ok({ count: clusters.length, clusters });
 }
 
 // --- playlist tools -------------------------------------------------------
 
-function mapPlaylistErr(err: unknown): ToolResult {
-  if (err instanceof PlaylistNotFoundError) {
-    return { ok: false, error: 'playlist_not_found' };
-  }
-  if (err instanceof VideoNotFoundError) {
-    return { ok: false, error: 'video_not_found' };
-  }
-  if (err instanceof DuplicateVideoInPlaylistError) {
-    return { ok: false, error: 'duplicate_video' };
-  }
-  if (err instanceof InvalidPositionError) {
-    return { ok: false, error: 'invalid_position' };
-  }
-  return { ok: false, error: err instanceof Error ? err.message : String(err) };
+function execCreatePlaylist(
+  args: z.infer<typeof CreatePlaylistInput>,
+): ToolResult {
+  const playlist = createPlaylist({
+    name: args.name,
+    description: args.description ?? null,
+  });
+  return ok({ playlist_id: playlist.id, name: playlist.name });
 }
 
-function execCreatePlaylist(args: {
-  name: string;
-  description?: string;
-}): ToolResult {
-  try {
-    const playlist = createPlaylist({
-      name: args.name,
-      description: args.description ?? null,
-    });
-    return {
-      ok: true,
-      data: { playlist_id: playlist.id, name: playlist.name },
-      summary: `created playlist #${playlist.id} "${playlist.name}"`,
-    };
-  } catch (err) {
-    return mapPlaylistErr(err);
-  }
+function execAddToPlaylist(
+  args: z.infer<typeof AddToPlaylistInput>,
+): ToolResult {
+  const result = addToPlaylist(args.playlist_id, args.video_id);
+  return ok({
+    playlist_id: args.playlist_id,
+    video_id: args.video_id,
+    position: result.position,
+  });
 }
 
-function execAddToPlaylist(args: {
-  playlist_id: number;
-  video_id: string;
-}): ToolResult {
-  try {
-    const result = addToPlaylist(args.playlist_id, args.video_id);
-    return {
-      ok: true,
-      data: { playlist_id: args.playlist_id, video_id: args.video_id, position: result.position },
-      summary: `added ${args.video_id} → playlist #${args.playlist_id} at position ${result.position}`,
-    };
-  } catch (err) {
-    return mapPlaylistErr(err);
-  }
+function execRemoveFromPlaylist(
+  args: z.infer<typeof RemoveFromPlaylistInput>,
+): ToolResult {
+  removeFromPlaylist(args.playlist_id, args.video_id);
+  return ok({ playlist_id: args.playlist_id, video_id: args.video_id });
 }
 
-function execRemoveFromPlaylist(args: {
-  playlist_id: number;
-  video_id: string;
-}): ToolResult {
-  try {
-    removeFromPlaylist(args.playlist_id, args.video_id);
-    return {
-      ok: true,
-      data: { playlist_id: args.playlist_id, video_id: args.video_id },
-      summary: `removed ${args.video_id} from playlist #${args.playlist_id}`,
-    };
-  } catch (err) {
-    return mapPlaylistErr(err);
-  }
-}
-
-function execReorderPlaylist(args: {
-  playlist_id: number;
-  video_id: string;
-  position: number;
-}): ToolResult {
-  try {
-    const result = reorderPlaylist(args.playlist_id, args.video_id, args.position);
-    return {
-      ok: true,
-      data: { playlist_id: args.playlist_id, video_id: args.video_id, position: result.position },
-      summary: `moved ${args.video_id} → position ${result.position} in playlist #${args.playlist_id}`,
-    };
-  } catch (err) {
-    return mapPlaylistErr(err);
-  }
+function execReorderPlaylist(
+  args: z.infer<typeof ReorderPlaylistInput>,
+): ToolResult {
+  const result = reorderPlaylist(args.playlist_id, args.video_id, args.position);
+  return ok({
+    playlist_id: args.playlist_id,
+    video_id: args.video_id,
+    position: result.position,
+  });
 }
 
 // --- triage_inbox / resurface ---------------------------------------------
@@ -600,222 +628,135 @@ const TRIAGE_NEXT: Record<string, 'saved' | 'archived' | 'dismissed'> = {
   dismiss: 'dismissed',
 };
 
-function execTriageInbox(args: {
-  video_id: string;
-  action: 'save' | 'archive' | 'dismiss';
-}): ToolResult {
+function execTriageInbox(
+  args: z.infer<typeof TriageInboxInput>,
+): ToolResult {
   const next = TRIAGE_NEXT[args.action];
-  if (!next) return { ok: false, error: 'invalid_action' };
-  try {
-    setConsumptionStatus(args.video_id, next);
-    return {
-      ok: true,
-      data: { video_id: args.video_id, status: next },
-      summary: `${args.action}d ${args.video_id}`,
-    };
-  } catch (err) {
-    if (err instanceof IllegalTransitionError) {
-      return { ok: false, error: 'illegal_transition', summary: err.message };
-    }
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
-  }
+  setConsumptionStatus(args.video_id, next);
+  return ok({ video_id: args.video_id, status: next });
 }
 
-function execResurface(args: { video_id: string }): ToolResult {
-  try {
-    setConsumptionStatus(args.video_id, 'saved');
-    return {
-      ok: true,
-      data: { video_id: args.video_id, status: 'saved' },
-      summary: `resurfaced ${args.video_id} → saved`,
-    };
-  } catch (err) {
-    if (err instanceof IllegalTransitionError) {
-      return { ok: false, error: 'illegal_transition', summary: err.message };
-    }
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
-  }
+function execResurface(args: z.infer<typeof ResurfaceInput>): ToolResult {
+  setConsumptionStatus(args.video_id, 'saved');
+  return ok({ video_id: args.video_id, status: 'saved' });
 }
 
 // --- mute_cluster_today ---------------------------------------------------
 
-function execMuteClusterToday(args: { cluster_id: number }): ToolResult {
-  try {
-    const result = setMuteToday(args.cluster_id);
-    return {
-      ok: true,
-      data: { cluster_id: args.cluster_id, muted: result.muted },
-      summary: result.muted
-        ? `muted cluster #${args.cluster_id} for today`
-        : `un-muted cluster #${args.cluster_id} for today`,
-    };
-  } catch (err) {
-    if (err instanceof ClusterNotFoundError) {
-      return { ok: false, error: 'cluster_not_found' };
-    }
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
-  }
+function execMuteClusterToday(
+  args: z.infer<typeof MuteClusterTodayInput>,
+): ToolResult {
+  const result = setMuteToday(args.cluster_id);
+  return ok({ cluster_id: args.cluster_id, muted: result.muted });
 }
 
 // --- search_youtube / propose_import --------------------------------------
 
-async function execSearchYoutube(args: {
-  query?: string;
-  channel_id?: string;
-  max_results?: number;
-}): Promise<ToolResult> {
-  const query = args.query?.trim();
-  if (!query) return { ok: false, error: 'query is required' };
+async function execSearchYoutube(
+  args: z.infer<typeof SearchYoutubeInput>,
+): Promise<ToolResult> {
   try {
     const results = await searchYoutube({
-      query,
+      query: args.query,
       channelId: args.channel_id,
       maxResults: args.max_results,
     });
-    return {
-      ok: true,
-      data: { count: results.length, results },
-      summary: `search_youtube returned ${results.length} item${
-        results.length === 1 ? '' : 's'
-      }`,
-    };
-  } catch (err) {
-    if (err instanceof YouTubeApiKeyMissingError) {
-      return {
-        ok: false,
-        error:
-          'youtube_api_key_missing: YOUTUBE_API_KEY not set. See RUNBOOK "Discovery (active)" for setup.',
-      };
+    return ok({ count: results.length, results });
+  } catch (e) {
+    if (e instanceof YouTubeApiKeyMissingError) {
+      return err(
+        'precondition_failed',
+        'YOUTUBE_API_KEY not set. See RUNBOOK "Discovery (active)" for setup.',
+        { code: 'youtube_api_key_missing' },
+      );
     }
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    throw e;
   }
 }
 
-function execProposeImport(args: {
-  kind?: 'video' | 'channel';
-  target_id?: string;
-  title?: string;
-  channel_name?: string;
-  source_kind?:
-    | 'description_link'
-    | 'description_handle'
-    | 'transcript_link';
-}): ToolResult {
-  if (!args.kind || (args.kind !== 'video' && args.kind !== 'channel')) {
-    return { ok: false, error: 'kind must be "video" or "channel"' };
+function execProposeImport(
+  args: z.infer<typeof ProposeImportInput>,
+): ToolResult {
+  if (isAlreadyKnown(args.target_id, args.kind)) {
+    return ok({ proposed: false, reason: 'already_known' });
   }
-  const targetId = args.target_id?.trim();
-  if (!targetId) return { ok: false, error: 'target_id is required' };
-  if (
-    !args.source_kind ||
-    !['description_link', 'description_handle', 'transcript_link'].includes(
-      args.source_kind,
-    )
-  ) {
-    return {
-      ok: false,
-      error:
-        'source_kind must be one of description_link | description_handle | transcript_link',
-    };
+  const result = proposeCandidate({
+    kind: args.kind,
+    targetId: args.target_id,
+    sourceVideoId: null,
+    sourceKind: args.source_kind,
+    score: 0,
+    breakdown: { source: 'active_search' },
+    title: args.title ?? null,
+    channelName: args.channel_name ?? null,
+  });
+  if (!result.inserted) {
+    return ok({ proposed: false, reason: 'already_known' });
   }
-  try {
-    if (isAlreadyKnown(targetId, args.kind)) {
-      return {
-        ok: true,
-        data: { proposed: false, reason: 'already_known' },
-        summary: `propose_import: ${targetId} is already known (in corpus, proposed, or rejected)`,
-      };
-    }
-    const result = proposeCandidate({
-      kind: args.kind,
-      targetId,
-      sourceVideoId: null,
-      sourceKind: args.source_kind,
-      score: 0,
-      breakdown: { source: 'active_search' },
-      title: args.title ?? null,
-      channelName: args.channel_name ?? null,
-    });
-    if (!result.inserted) {
-      return {
-        ok: true,
-        data: { proposed: false, reason: 'already_known' },
-        summary: `propose_import: ${targetId} already proposed`,
-      };
-    }
-    return {
-      ok: true,
-      data: { proposed: true, candidate_id: result.id },
-      summary: `propose_import: staged candidate #${result.id} (${args.kind} ${targetId})`,
-    };
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
-  }
+  return ok({ proposed: true, candidate_id: result.id });
 }
 
 // --- dispatcher -----------------------------------------------------------
 
+function isToolName(name: string): name is ToolName {
+  return (TOOL_NAMES as readonly string[]).includes(name);
+}
+
+async function dispatch(
+  name: ToolName,
+  args: unknown,
+): Promise<ToolResult> {
+  switch (name) {
+    case 'search_pool':
+      return execSearchPool(args as z.infer<typeof SearchPoolInput>);
+    case 'rank_by_theme':
+      return await execRankByTheme(args as z.infer<typeof RankByThemeInput>);
+    case 'get_video_detail':
+      return execGetVideoDetail(args as z.infer<typeof GetVideoDetailInput>);
+    case 'get_taste_clusters':
+      return execGetTasteClusters();
+    case 'create_playlist':
+      return execCreatePlaylist(args as z.infer<typeof CreatePlaylistInput>);
+    case 'add_to_playlist':
+      return execAddToPlaylist(args as z.infer<typeof AddToPlaylistInput>);
+    case 'remove_from_playlist':
+      return execRemoveFromPlaylist(
+        args as z.infer<typeof RemoveFromPlaylistInput>,
+      );
+    case 'reorder_playlist':
+      return execReorderPlaylist(args as z.infer<typeof ReorderPlaylistInput>);
+    case 'triage_inbox':
+      return execTriageInbox(args as z.infer<typeof TriageInboxInput>);
+    case 'mute_cluster_today':
+      return execMuteClusterToday(
+        args as z.infer<typeof MuteClusterTodayInput>,
+      );
+    case 'resurface':
+      return execResurface(args as z.infer<typeof ResurfaceInput>);
+    case 'search_youtube':
+      return await execSearchYoutube(
+        args as z.infer<typeof SearchYoutubeInput>,
+      );
+    case 'propose_import':
+      return execProposeImport(args as z.infer<typeof ProposeImportInput>);
+  }
+}
+
 export async function executeTool(
   name: string,
-  args: Record<string, unknown>,
+  rawInput: unknown,
 ): Promise<ToolResult> {
+  if (!isToolName(name)) {
+    return err('not_found', `unknown tool: ${name}`);
+  }
+  const schema = TOOL_INPUT_SCHEMAS[name];
+  const parsed = schema.safeParse(rawInput ?? {});
+  if (!parsed.success) {
+    return fromZodError(parsed.error);
+  }
   try {
-    switch (name) {
-      case 'search_pool':
-        return execSearchPool(args as Parameters<typeof execSearchPool>[0]);
-      case 'rank_by_theme':
-        return await execRankByTheme(
-          args as Parameters<typeof execRankByTheme>[0],
-        );
-      case 'get_video_detail':
-        return execGetVideoDetail(
-          args as Parameters<typeof execGetVideoDetail>[0],
-        );
-      case 'get_taste_clusters':
-        return execGetTasteClusters();
-      case 'create_playlist':
-        return execCreatePlaylist(
-          args as Parameters<typeof execCreatePlaylist>[0],
-        );
-      case 'add_to_playlist':
-        return execAddToPlaylist(
-          args as Parameters<typeof execAddToPlaylist>[0],
-        );
-      case 'remove_from_playlist':
-        return execRemoveFromPlaylist(
-          args as Parameters<typeof execRemoveFromPlaylist>[0],
-        );
-      case 'reorder_playlist':
-        return execReorderPlaylist(
-          args as Parameters<typeof execReorderPlaylist>[0],
-        );
-      case 'triage_inbox':
-        return execTriageInbox(
-          args as Parameters<typeof execTriageInbox>[0],
-        );
-      case 'mute_cluster_today':
-        return execMuteClusterToday(
-          args as Parameters<typeof execMuteClusterToday>[0],
-        );
-      case 'resurface':
-        return execResurface(
-          args as Parameters<typeof execResurface>[0],
-        );
-      case 'search_youtube':
-        return await execSearchYoutube(
-          args as Parameters<typeof execSearchYoutube>[0],
-        );
-      case 'propose_import':
-        return execProposeImport(
-          args as Parameters<typeof execProposeImport>[0],
-        );
-      default:
-        return { ok: false, error: `unknown_tool:${name}` };
-    }
-  } catch (err) {
-    return {
-      ok: false,
-      error: err instanceof Error ? err.message : String(err),
-    };
+    return await dispatch(name, parsed.data);
+  } catch (e) {
+    return mapToolError(e);
   }
 }

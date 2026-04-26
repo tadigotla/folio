@@ -36,10 +36,10 @@ logs:
     @echo "next dev runs in the foreground — its logs go to whatever terminal ran \`just dev\`."
     @echo "There is no background job in this project."
 
-# No test runner configured. Run the linter instead.
+# Run the vitest suite (covers src/lib/consumption.ts and src/lib/taste-edit.ts
+# only — see RUNBOOK "Tests" for the deliberately narrow scope).
 test:
-    @echo "No test runner in this project (see CLAUDE.md). Running lint:"
-    npm run lint
+    npm run test
 
 # Timestamped copy of events.db (run before risky migrations)
 backup-db:

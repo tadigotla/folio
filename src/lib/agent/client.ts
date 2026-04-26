@@ -30,3 +30,21 @@ export function getAgentMaxTurns(): number {
   const n = raw ? Number(raw) : NaN;
   return Number.isInteger(n) && n > 0 ? n : 10;
 }
+
+function readPositiveInt(envName: string, fallback: number): number {
+  const raw = process.env[envName];
+  if (raw === undefined) return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) return fallback;
+  return n;
+}
+
+/** Returns 0 when the cap is disabled (env unset → default; env=0 → disabled). */
+export function getAgentMaxInputTokens(): number {
+  return readPositiveInt('AGENT_MAX_INPUT_TOKENS', 200000);
+}
+
+/** Returns 0 when the cap is disabled (env unset → default; env=0 → disabled). */
+export function getAgentMaxOutputTokens(): number {
+  return readPositiveInt('AGENT_MAX_OUTPUT_TOKENS', 20000);
+}

@@ -17,6 +17,16 @@ export function getDb(): Database.Database {
   return _db;
 }
 
+// Test-only: swap the singleton for an in-memory DB. Production code paths
+// remain unchanged; the only callers are vitest setup/teardown helpers.
+export function setDbForTest(db: Database.Database): void {
+  _db = db;
+}
+
+export function clearDbForTest(): void {
+  _db = null;
+}
+
 export function runMigrations(): void {
   const db = getDb();
 
