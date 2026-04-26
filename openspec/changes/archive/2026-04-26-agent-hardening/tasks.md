@@ -61,7 +61,7 @@
 ## 9. Spec sync
 
 - [x] 9.1 Run `openspec validate agent-hardening --strict` (or the local equivalent) and resolve any structural issues.
-- [ ] 9.2 Once green and merged, run `/opsx:archive` to fold the delta into `openspec/specs/curation-agent/spec.md`.
+- [x] 9.2 Once green and merged, run `/opsx:archive` to fold the delta into `openspec/specs/curation-agent/spec.md`.
 
 ## 10. Verification before declaring done
 
