@@ -5,6 +5,7 @@ import { ConsumptionAction } from '../../components/ConsumptionAction';
 import { TopNav } from '../../components/TopNav';
 import { Kicker } from '../../components/ui/Kicker';
 import { Rule } from '../../components/ui/Rule';
+import { ProposedRail } from '../../components/discovery/ProposedRail';
 
 export const dynamic = 'force-dynamic';
 
@@ -27,6 +28,8 @@ export default function InboxPage() {
           {videos.length} awaiting triage
         </p>
       </header>
+
+      <ProposedRail />
 
       <Rule thick className="mt-8" />
 

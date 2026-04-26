@@ -133,20 +133,25 @@ itself, persists every turn (user, assistant, tool) to
 `POST /api/agent/message` is a thin SSE adapter; the client never
 dispatches tools.
 
-Eleven tools total (`src/lib/agent/tools.ts`): `search_pool`,
+Thirteen tools total (`src/lib/agent/tools.ts`): `search_pool`,
 `rank_by_theme`, `get_video_detail`, `get_taste_clusters` (all read-only
-over the substrate), plus the consumption-side mutations
-`create_playlist`, `add_to_playlist`, `remove_from_playlist`,
-`reorder_playlist`, `triage_inbox`, `mute_cluster_today`, `resurface`.
-The agent has no write access to taste tables (cluster edits remain on
-`/taste`); the per-day mute is the one taste-side action. Tool failures
-surface as `tool_result` blocks (normal loop input), not SSE `error`
-events — `error` is reserved for model/API faults and the
-`AGENT_MAX_TURNS` cap.
+over the substrate); the consumption-side mutations `create_playlist`,
+`add_to_playlist`, `remove_from_playlist`, `reorder_playlist`,
+`triage_inbox`, `mute_cluster_today`, `resurface`; and the active-
+discovery pair `search_youtube` + `propose_import` (user-initiated
+outbound search and candidate staging — see Discovery below). The agent
+has no write access to taste tables (cluster edits remain on `/taste`);
+the per-day mute is the one taste-side action. Tool failures surface as
+`tool_result` blocks (normal loop input), not SSE `error` events —
+`error` is reserved for model/API faults and the `AGENT_MAX_TURNS` cap.
 
 Without `ANTHROPIC_API_KEY`, `/api/agent/status` returns
-`{ apiKeyPresent: false }` and `/chat` renders a disabled card; the rest
-of the app is unaffected. See `RUNBOOK.md` § "Curation agent" for setup,
+`{ apiKeyPresent: false, youtubeSearchEnabled, ... }` and `/chat`
+renders a disabled card; the rest of the app is unaffected. Without
+`YOUTUBE_API_KEY`, `youtubeSearchEnabled` is `false` and the `/chat`
+composer surfaces a one-line "Active YouTube search is disabled" hint;
+`search_youtube` returns a `youtube_api_key_missing` tool error.
+See `RUNBOOK.md` § "Curation agent" and "Discovery (active)" for setup,
 cost expectations, and privacy posture.
 
 ### Overnight maintenance (`src/lib/nightly/`, `src/lib/discovery/`, `scripts/nightly.ts`, `ops/com.folio.nightly.plist.tmpl`)
@@ -175,11 +180,42 @@ transcripts of `consumption.status IN ('saved','in_progress')` videos;
 `clusterCosine × clusterWeight × sourceFreshness` against active clusters;
 `src/lib/discovery/candidates.ts` is the **single legal mutation path**
 for `discovery_candidates` / `discovery_rejections` (idempotent on
-`(target_id, source_video_id, source_kind)`). V1 stages rows but has **no
-active reader** — no `/inbox` Proposed rail, no approve/dismiss API, no
-`search_youtube` agent tool; phase 6 owns those surfaces. See
+`(target_id, source_video_id, source_kind)` for description-graph rows;
+`isAlreadyKnown` covers the active-search NULL case). See
 `RUNBOOK.md` §§ "Overnight maintenance" and "Discovery candidates
 (substrate)" for install/inspection.
+
+### Active discovery (`src/lib/discovery/{search,read,approve,dismiss,rejections}.ts`, `src/components/discovery/`, `src/app/api/discovery/`, `/settings/discovery`)
+
+Phase 6 (`active-discovery`, 2026-04-26) shipped the active half of the
+substrate. `src/lib/discovery/search.ts#searchYoutube` wraps YouTube
+Data API v3 `search.list` (key-based, not OAuth — see the
+`dataApiGet` / `fetchVideoMetadata` / `fetchChannelByIdOrHandle` helpers
+in `src/lib/youtube-api.ts`). `src/lib/discovery/approve.ts#approveCandidate`
+is the only legal entry point for moving a candidate into the corpus —
+it fetches metadata via the Data API outside any DB transaction, then
+inside one transaction reuses `importVideos` (provenance kind `like`),
+flips the candidate row to `'approved'`, and deletes it. The companion
+`src/lib/discovery/dismiss.ts` and `src/lib/discovery/rejections.ts`
+own the dismiss + rejection-clear paths; `src/lib/discovery/read.ts`
+provides the `listProposedCandidates` / `listRejections` helpers used by
+both RSC pages and the agent snapshot.
+
+Six API routes under `src/app/api/discovery/`: `GET candidates`,
+`POST candidates/[id]/approve`, `POST candidates/[id]/dismiss`,
+`GET rejections`, `DELETE rejections/[id]`, `DELETE rejections`.
+Approve maps `CandidateNotFoundError → 404`,
+`YouTubeApiKeyMissingError → 412`, `YouTubeDataApiError → 502`.
+`src/components/discovery/ProposedRail.tsx` mounts on `/inbox` above
+the existing thick rule and renders nothing when no `proposed` rows
+exist. `/settings/discovery` is the rejection-list manager.
+
+The two new agent tools (`search_youtube`, `propose_import`) live in
+`src/lib/agent/tools.ts`. The system prompt forbids auto-calling
+`search_youtube`; the tool's description repeats the rule for
+tool-selection-time visibility. Migration `018_active_discovery.sql`
+relaxed `discovery_candidates.source_video_id` to nullable so active-
+search rows can persist without a fake source video.
 
 ### Time handling (`src/lib/time.ts`)
 
@@ -188,7 +224,7 @@ All timestamps are stored as UTC ISO 8601. Display is `America/New_York` (Tampa)
 ### Web UI (`src/app/`, App Router)
 
 - Pages are React Server Components reading SQLite directly via the `consumption.ts` helpers (which wrap `getDb()`). There is no API layer between RSC pages and the DB.
-- Routes: `/` (consumption-home rail stack), `/inbox` (triage), `/library` (Saved / In Progress / Archived sections — In Progress cards render a thin progress bar when `last_position_seconds` and `duration_seconds` are both known), `/playlists`, `/playlists/[id]`, `/taste`, `/taste/[clusterId]`, `/tag/[slug]`, `/watch/[id]` (IFrame Player API embed + metadata), `/chat` (curation agent), `/settings/youtube`.
+- Routes: `/` (consumption-home rail stack), `/inbox` (triage; Proposed rail mounts here), `/library` (Saved / In Progress / Archived sections — In Progress cards render a thin progress bar when `last_position_seconds` and `duration_seconds` are both known), `/playlists`, `/playlists/[id]`, `/taste`, `/taste/[clusterId]`, `/tag/[slug]`, `/watch/[id]` (IFrame Player API embed + metadata), `/chat` (curation agent), `/settings/youtube`, `/settings/discovery` (rejection-list manager).
 - Mutation APIs:
   - `POST /api/consumption` `{ videoId, next }` — explicit user-initiated transitions (Save, Archive, Dismiss, Re-open).
   - `POST /api/consumption-progress` `{ videoId, action, position? }` — implicit playback signals emitted by the Player. Fire-and-forget from the client; accepts `sendBeacon`-style text bodies.

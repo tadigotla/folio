@@ -1,6 +1,8 @@
 # Cleanup Inventory — Magazine Teardown
 
-_Last completed: 2026-04-24 (phase 5 / `overnight-maintenance` shipped and archived to `openspec/changes/archive/2026-04-24-overnight-maintenance/` — nightly pipeline verified end-to-end: two full runs against the live corpus, launchd install/uninstall round-trip, all substrate invariants confirmed. Phase 6a (description-graph) was absorbed into phase 5, so the remaining phase 6 is **active discovery only**: `search_youtube` agent tool + `/inbox` Proposed rail + approve/dismiss endpoints + `YOUTUBE_API_KEY`.)_
+_Last completed: 2026-04-26 (phase 6 / `active-discovery` shipped — migration 018 relaxed `discovery_candidates.source_video_id` to nullable; `src/lib/discovery/{search,read,approve,dismiss,rejections}.ts` plus the six `/api/discovery/**` routes are live; `ProposedRail` mounted on `/inbox`; `/settings/discovery` manages the rejection list; `search_youtube` + `propose_import` agent tools added to `src/lib/agent/tools.ts` with the user-initiated-only contract baked into the system prompt; `/api/agent/status.youtubeSearchEnabled` drives the chat composer's disabled-state hint; `YOUTUBE_API_KEY` validated end-to-end against `search.list` + `videos.list`. The full consumption-first arc — phases 1–6 — is closed.)_
+
+_Prior: 2026-04-24 (phase 5 / `overnight-maintenance` shipped and archived to `openspec/changes/archive/2026-04-24-overnight-maintenance/` — nightly pipeline verified end-to-end: two full runs against the live corpus, launchd install/uninstall round-trip, all substrate invariants confirmed.)_
 
 _Prior: 2026-04-23 (phase 5 code + docs shipped unverified; phase 4 / `magazine-teardown` shipped — see `openspec/changes/archive/2026-04-23-magazine-teardown/`)._
 

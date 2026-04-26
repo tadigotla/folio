@@ -6,13 +6,18 @@ import type {
 } from './description-graph';
 import type { ScoreBreakdown } from './score';
 
+export type CandidateBreakdown =
+  | ScoreBreakdown
+  | { source: 'active_search' }
+  | Record<string, unknown>;
+
 export interface ProposeInput {
   kind: CandidateKind;
   targetId: string;
-  sourceVideoId: string;
+  sourceVideoId: string | null;
   sourceKind: CandidateSourceKind;
   score: number;
-  breakdown: ScoreBreakdown;
+  breakdown: CandidateBreakdown;
   title?: string | null;
   channelName?: string | null;
 }
@@ -58,17 +63,23 @@ export function proposeCandidate(input: ProposeInput): {
   const db = getDb();
   const now = nowUTC();
   const run = db.transaction(() => {
-    const existing = db
-      .prepare(
-        `SELECT id FROM discovery_candidates
-          WHERE target_id = ?
-            AND source_video_id = ?
-            AND source_kind = ?`,
-      )
-      .get(input.targetId, input.sourceVideoId, input.sourceKind) as
-      | { id: number }
-      | undefined;
-    if (existing) return { inserted: false, id: existing.id };
+    // Active-search candidates carry sourceVideoId = NULL. Their dedup is
+    // handled by `isAlreadyKnown` upstream (which checks both rejections and
+    // any in-flight `proposed` row for the same target). Skip the in-table
+    // dedup query entirely for that case so SQL NULL semantics don't bite.
+    if (input.sourceVideoId !== null) {
+      const existing = db
+        .prepare(
+          `SELECT id FROM discovery_candidates
+            WHERE target_id = ?
+              AND source_video_id = ?
+              AND source_kind = ?`,
+        )
+        .get(input.targetId, input.sourceVideoId, input.sourceKind) as
+        | { id: number }
+        | undefined;
+      if (existing) return { inserted: false, id: existing.id };
+    }
 
     const info = db
       .prepare(

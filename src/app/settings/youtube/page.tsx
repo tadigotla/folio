@@ -166,6 +166,17 @@ export default async function YouTubeSettingsPage({
           </div>
         </section>
       )}
+
+      <footer className="mt-12 border-t border-rule pt-6 font-sans text-xs italic text-ink-soft">
+        Manage discovery dismissals at{' '}
+        <a
+          href="/settings/discovery"
+          className="underline hover:text-ink"
+        >
+          /settings/discovery
+        </a>
+        .
+      </footer>
     </div>
   );
 }

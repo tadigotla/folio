@@ -4,6 +4,7 @@ import { getClusterSummaries } from '../taste-read';
 import { listPlaylists } from '../playlists';
 import { getMutedClusterIdsToday } from '../mutes';
 import { todayLocal } from '../time';
+import { listProposedCandidates } from '../discovery/read';
 
 /**
  * Builds the per-turn snapshot block for the curation companion: consumption
@@ -50,6 +51,7 @@ export function buildSnapshotBlock(): Anthropic.TextBlockParam {
   const clusters = getClusterSummaries();
   const muted = getMutedClusterIdsToday();
   const playlists = listPlaylists();
+  const proposedCandidatesCount = listProposedCandidates({ limit: 50 }).length;
 
   const lines: string[] = [];
   lines.push(`### Today (${today})`);
@@ -58,6 +60,9 @@ export function buildSnapshotBlock(): Anthropic.TextBlockParam {
   );
   lines.push(
     `Fresh in the last 24h: ${freshRow.n} new inbox row${freshRow.n === 1 ? '' : 's'}.`,
+  );
+  lines.push(
+    `Proposed imports awaiting approval on /inbox: ${proposedCandidatesCount}.`,
   );
 
   lines.push('');

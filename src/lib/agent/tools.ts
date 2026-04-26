@@ -22,6 +22,9 @@ import {
   InvalidPositionError,
 } from '../playlists';
 import { setMuteToday, ClusterNotFoundError } from '../mutes';
+import { searchYoutube } from '../discovery/search';
+import { YouTubeApiKeyMissingError } from '../youtube-api';
+import { proposeCandidate, isAlreadyKnown } from '../discovery/candidates';
 
 export const TOOL_NAMES = [
   'search_pool',
@@ -35,6 +38,8 @@ export const TOOL_NAMES = [
   'triage_inbox',
   'mute_cluster_today',
   'resurface',
+  'search_youtube',
+  'propose_import',
 ] as const;
 
 export type ToolName = (typeof TOOL_NAMES)[number];
@@ -179,6 +184,53 @@ export const TOOL_DEFS: Anthropic.Tool[] = [
       properties: { video_id: { type: 'string' } },
     },
   },
+  {
+    name: 'search_youtube',
+    description:
+      'User-initiated YouTube Data API search. Only call when the user explicitly asks you to find new content (channels or videos) outside the corpus. Never auto-call to verify metadata, enrich a reply, or answer a question about an existing video — use search_pool / get_video_detail for that. Returns normalized {kind, target_id, title, channel_name} items; nothing is imported until the user approves on /inbox.',
+    input_schema: {
+      type: 'object',
+      required: ['query'],
+      properties: {
+        query: { type: 'string' },
+        channel_id: {
+          type: 'string',
+          description: 'Restrict the search to one channel id (UCxxx). Optional.',
+        },
+        max_results: {
+          type: 'integer',
+          description: 'Default 10, max 25.',
+          minimum: 1,
+          maximum: 25,
+        },
+      },
+    },
+  },
+  {
+    name: 'propose_import',
+    description:
+      'Stage a video or channel as a Proposed import for the user to approve on /inbox. This NEVER imports content directly — every new corpus row is gated by a user click. Use after search_youtube. Drops silently when the target is already known (in corpus, already proposed, or in the rejection list).',
+    input_schema: {
+      type: 'object',
+      required: ['kind', 'target_id', 'source_kind'],
+      properties: {
+        kind: { type: 'string', enum: ['video', 'channel'] },
+        target_id: {
+          type: 'string',
+          description:
+            'YouTube video id (e.g. dQw4w9WgXcQ) or channel id (UCxxx) or @handle.',
+        },
+        title: { type: 'string' },
+        channel_name: { type: 'string' },
+        source_kind: {
+          type: 'string',
+          enum: ['description_link', 'description_handle', 'transcript_link'],
+          description:
+            'Use description_link for video search results; description_handle for channel search results; transcript_link only when the candidate came from a transcript.',
+        },
+      },
+    },
+  },
 ];
 
 export function getToolsForRequest(): Anthropic.Tool[] {
@@ -205,6 +257,7 @@ export const STATE_MUTATION_TOOLS: ReadonlySet<ToolName> = new Set([
   'triage_inbox',
   'mute_cluster_today',
   'resurface',
+  'propose_import',
 ]);
 
 // --- search_pool ----------------------------------------------------------
@@ -604,6 +657,102 @@ function execMuteClusterToday(args: { cluster_id: number }): ToolResult {
   }
 }
 
+// --- search_youtube / propose_import --------------------------------------
+
+async function execSearchYoutube(args: {
+  query?: string;
+  channel_id?: string;
+  max_results?: number;
+}): Promise<ToolResult> {
+  const query = args.query?.trim();
+  if (!query) return { ok: false, error: 'query is required' };
+  try {
+    const results = await searchYoutube({
+      query,
+      channelId: args.channel_id,
+      maxResults: args.max_results,
+    });
+    return {
+      ok: true,
+      data: { count: results.length, results },
+      summary: `search_youtube returned ${results.length} item${
+        results.length === 1 ? '' : 's'
+      }`,
+    };
+  } catch (err) {
+    if (err instanceof YouTubeApiKeyMissingError) {
+      return {
+        ok: false,
+        error:
+          'youtube_api_key_missing: YOUTUBE_API_KEY not set. See RUNBOOK "Discovery (active)" for setup.',
+      };
+    }
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+function execProposeImport(args: {
+  kind?: 'video' | 'channel';
+  target_id?: string;
+  title?: string;
+  channel_name?: string;
+  source_kind?:
+    | 'description_link'
+    | 'description_handle'
+    | 'transcript_link';
+}): ToolResult {
+  if (!args.kind || (args.kind !== 'video' && args.kind !== 'channel')) {
+    return { ok: false, error: 'kind must be "video" or "channel"' };
+  }
+  const targetId = args.target_id?.trim();
+  if (!targetId) return { ok: false, error: 'target_id is required' };
+  if (
+    !args.source_kind ||
+    !['description_link', 'description_handle', 'transcript_link'].includes(
+      args.source_kind,
+    )
+  ) {
+    return {
+      ok: false,
+      error:
+        'source_kind must be one of description_link | description_handle | transcript_link',
+    };
+  }
+  try {
+    if (isAlreadyKnown(targetId, args.kind)) {
+      return {
+        ok: true,
+        data: { proposed: false, reason: 'already_known' },
+        summary: `propose_import: ${targetId} is already known (in corpus, proposed, or rejected)`,
+      };
+    }
+    const result = proposeCandidate({
+      kind: args.kind,
+      targetId,
+      sourceVideoId: null,
+      sourceKind: args.source_kind,
+      score: 0,
+      breakdown: { source: 'active_search' },
+      title: args.title ?? null,
+      channelName: args.channel_name ?? null,
+    });
+    if (!result.inserted) {
+      return {
+        ok: true,
+        data: { proposed: false, reason: 'already_known' },
+        summary: `propose_import: ${targetId} already proposed`,
+      };
+    }
+    return {
+      ok: true,
+      data: { proposed: true, candidate_id: result.id },
+      summary: `propose_import: staged candidate #${result.id} (${args.kind} ${targetId})`,
+    };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 // --- dispatcher -----------------------------------------------------------
 
 export async function executeTool(
@@ -651,6 +800,14 @@ export async function executeTool(
       case 'resurface':
         return execResurface(
           args as Parameters<typeof execResurface>[0],
+        );
+      case 'search_youtube':
+        return await execSearchYoutube(
+          args as Parameters<typeof execSearchYoutube>[0],
+        );
+      case 'propose_import':
+        return execProposeImport(
+          args as Parameters<typeof execProposeImport>[0],
         );
       default:
         return { ok: false, error: `unknown_tool:${name}` };

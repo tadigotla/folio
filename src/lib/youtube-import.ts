@@ -83,24 +83,27 @@ interface UpsertChannelResult {
   inserted: boolean;
 }
 
-function upsertChannel(v: NormalizedYouTubeVideo): UpsertChannelResult {
+export function upsertChannel(input: {
+  channelId: string;
+  channelName: string;
+}): UpsertChannelResult {
   const db = getDb();
   const now = nowUTC();
   const existing = db
     .prepare(`SELECT id FROM channels WHERE id = ?`)
-    .get(v.channelId) as { id: string } | undefined;
+    .get(input.channelId) as { id: string } | undefined;
 
   if (existing) {
     db.prepare(
       `UPDATE channels SET name = ?, last_checked_at = ? WHERE id = ?`,
-    ).run(v.channelName || '', now, v.channelId);
+    ).run(input.channelName || '', now, input.channelId);
     return { inserted: false };
   }
 
   db.prepare(
     `INSERT INTO channels (id, name, handle, subscribed, first_seen_at, last_checked_at)
      VALUES (?, ?, NULL, 0, ?, ?)`,
-  ).run(v.channelId, v.channelName || '', now, now);
+  ).run(input.channelId, input.channelName || '', now, now);
   return { inserted: true };
 }
 
@@ -181,7 +184,7 @@ function writeProvenance(
   ).run(videoId, kind, sourceRef, nowUTC(), weight);
 }
 
-function importVideos(
+export function importVideos(
   videos: NormalizedYouTubeVideo[],
   kind: ProvenanceKind,
   sourceRef: string,
@@ -192,7 +195,10 @@ function importVideos(
   const weight = WEIGHT_BY_KIND[kind];
   const run = db.transaction((batch: NormalizedYouTubeVideo[]) => {
     for (const v of batch) {
-      const ch = upsertChannel(v);
+      const ch = upsertChannel({
+        channelId: v.channelId,
+        channelName: v.channelName,
+      });
       if (ch.inserted) counts.channels_new += 1;
       const vid = upsertVideo(v, defaultStatus);
       if (vid.inserted) counts.videos_new += 1;

@@ -6,6 +6,24 @@ import {
 
 const API_BASE = 'https://www.googleapis.com/youtube/v3';
 
+export class YouTubeApiKeyMissingError extends Error {
+  constructor() {
+    super('YOUTUBE_API_KEY is not set');
+    this.name = 'YouTubeApiKeyMissingError';
+  }
+}
+
+export class YouTubeDataApiError extends Error {
+  status: number;
+  body: string;
+  constructor(status: number, body: string) {
+    super(`YouTube Data API ${status}: ${body.slice(0, 240)}`);
+    this.name = 'YouTubeDataApiError';
+    this.status = status;
+    this.body = body;
+  }
+}
+
 export interface NormalizedYouTubeVideo {
   videoId: string;
   title: string;
@@ -236,6 +254,141 @@ export async function getChannelUploadsPlaylistId(
   const res = await youtubeFetch(url.toString());
   const body = (await res.json()) as ChannelListResponse;
   return body.items?.[0]?.contentDetails?.relatedPlaylists?.uploads ?? null;
+}
+
+// --- Key-based Data API helpers ------------------------------------------
+//
+// Used by the active-discovery surfaces (search_youtube tool + approve flow).
+// These endpoints accept a key= query param instead of an OAuth bearer token,
+// so they bypass the OAuth refresh flow above.
+
+const DATA_API_TIMEOUT_MS = 10_000;
+
+export async function dataApiGet<T>(
+  path: string,
+  params: Record<string, string>,
+): Promise<T> {
+  const key = process.env.YOUTUBE_API_KEY;
+  if (!key) throw new YouTubeApiKeyMissingError();
+
+  const url = new URL(`${API_BASE}/${path}`);
+  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+  url.searchParams.set('key', key);
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), DATA_API_TIMEOUT_MS);
+  try {
+    const res = await fetch(url.toString(), { signal: ctrl.signal });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new YouTubeDataApiError(res.status, body);
+    }
+    return (await res.json()) as T;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const ISO_DURATION_RE = /^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/;
+
+function parseIso8601Duration(s: string | undefined): number | undefined {
+  if (!s) return undefined;
+  const m = ISO_DURATION_RE.exec(s);
+  if (!m) return undefined;
+  const days = Number(m[1] ?? 0);
+  const hours = Number(m[2] ?? 0);
+  const mins = Number(m[3] ?? 0);
+  const secs = Number(m[4] ?? 0);
+  return days * 86400 + hours * 3600 + mins * 60 + secs;
+}
+
+interface VideoListResponse {
+  items?: Array<{
+    id?: string;
+    snippet?: {
+      title?: string;
+      description?: string;
+      channelId?: string;
+      channelTitle?: string;
+      publishedAt?: string;
+      thumbnails?: Record<string, { url?: string } | undefined>;
+    };
+    contentDetails?: { duration?: string };
+  }>;
+}
+
+export async function fetchVideoMetadata(
+  videoId: string,
+): Promise<NormalizedYouTubeVideo> {
+  const body = await dataApiGet<VideoListResponse>('videos', {
+    part: 'snippet,contentDetails',
+    id: videoId,
+  });
+  const item = body.items?.[0];
+  if (!item) {
+    throw new YouTubeDataApiError(404, `video not found: ${videoId}`);
+  }
+  const snippet = item.snippet ?? {};
+  const channelId = snippet.channelId ?? '';
+  if (!channelId) {
+    throw new YouTubeDataApiError(
+      502,
+      `video ${videoId} returned no channelId`,
+    );
+  }
+  return {
+    videoId,
+    title: snippet.title ?? '',
+    description: snippet.description ?? '',
+    channelId,
+    channelName: snippet.channelTitle ?? '',
+    publishedAt: snippet.publishedAt ?? '',
+    durationSeconds: parseIso8601Duration(item.contentDetails?.duration),
+    thumbnailUrl: pickThumb(snippet.thumbnails),
+  };
+}
+
+interface ChannelListResponseFull {
+  items?: Array<{
+    id?: string;
+    snippet?: {
+      title?: string;
+      customUrl?: string;
+      thumbnails?: Record<string, { url?: string } | undefined>;
+    };
+  }>;
+}
+
+export interface NormalizedChannelLookup {
+  channelId: string;
+  title: string;
+  handle: string | null;
+  thumbnailUrl: string | null;
+}
+
+export async function fetchChannelByIdOrHandle(
+  idOrHandle: string,
+): Promise<NormalizedChannelLookup> {
+  const params: Record<string, string> = { part: 'snippet' };
+  if (idOrHandle.startsWith('@')) {
+    params.forHandle = idOrHandle;
+  } else {
+    params.id = idOrHandle;
+  }
+  const body = await dataApiGet<ChannelListResponseFull>('channels', params);
+  const item = body.items?.[0];
+  if (!item || !item.id) {
+    throw new YouTubeDataApiError(404, `channel not found: ${idOrHandle}`);
+  }
+  const snippet = item.snippet ?? {};
+  const customUrl = snippet.customUrl ?? null;
+  const handle = customUrl && customUrl.startsWith('@') ? customUrl : null;
+  return {
+    channelId: item.id,
+    title: snippet.title ?? '',
+    handle,
+    thumbnailUrl: pickThumb(snippet.thumbnails) ?? null,
+  };
 }
 
 export async function listUserPlaylists(): Promise<UserPlaylist[]> {

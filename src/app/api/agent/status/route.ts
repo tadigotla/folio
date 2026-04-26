@@ -6,5 +6,6 @@ export async function GET() {
   return Response.json({
     apiKeyPresent: hasApiKey(),
     model: getAgentModel(),
+    youtubeSearchEnabled: !!process.env.YOUTUBE_API_KEY,
   });
 }

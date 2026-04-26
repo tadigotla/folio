@@ -1,5 +1,5 @@
 # Runbook
-_Last verified: 2026-04-23 (overnight-maintenance: nightly job + discovery substrate)_
+_Last verified: 2026-04-26 (active-discovery: phase 6 — search_youtube + Proposed rail + approve/dismiss)_
 
 ## Overview
 Folio — a personal, taste-aware consumption room for YouTube. Single-process
@@ -656,11 +656,16 @@ silently breaks the job until it's regenerated.
 
 ## Discovery candidates (substrate)
 
-Phase 5 of the consumption-first umbrella stages proposed imports but
-**does not surface them yet**. The `discovery_candidates` table
-accumulates rows that no UI reads; phase 6 owns the active discovery
-surfaces (`/inbox` "Proposed" rail, approve/dismiss API, `search_youtube`
-agent tool).
+Phase 5 of the consumption-first umbrella populates `discovery_candidates`
+via the nightly description-graph scan. Phase 6 (`active-discovery`,
+2026-04-26) added the active surfaces: the `/inbox` Proposed rail, the
+approve/dismiss API, the `search_youtube` + `propose_import` agent tools,
+and `/settings/discovery` for managing the rejection list. See
+**Discovery (active)** below for the operator side of phase 6.
+
+Migration `018_active_discovery.sql` relaxed `source_video_id` to
+nullable. Description-graph rows still carry a non-NULL source video;
+active-search rows pass NULL.
 
 ### Inspect proposed candidates
 
@@ -677,15 +682,87 @@ sqlite3 events.db "SELECT score_breakdown FROM discovery_candidates WHERE id = 1
 ### Rejection list
 
 `discovery_rejections(target_id PRIMARY KEY, kind, dismissed_at)` is the
-permanent dismiss list — the description-graph scan skips any `target_id`
-present here, forever. Phase 6's dismiss endpoint will append to this
-table; in phase 5 it stays empty.
+permanent dismiss list — both the description-graph scan AND active
+`propose_import` calls skip any `target_id` present here, forever.
 
-Clear a single entry by hand (e.g. if a target was rejected by mistake):
+Manage via `/settings/discovery` (per-row Clear and a Clear-all). To
+clear by hand:
 
 ```bash
 sqlite3 events.db "DELETE FROM discovery_rejections WHERE target_id = '<id>'"
 ```
+
+## Discovery (active)
+
+Active discovery extends the substrate above with a user-initiated
+outbound search. The curation agent at `/chat` exposes two tools:
+
+- `search_youtube({ query, channel_id?, max_results? })` — wraps YouTube
+  Data API v3 `search.list`. Strictly user-initiated — the agent's system
+  prompt forbids auto-calling it to verify metadata or enrich a reply.
+  Returns normalized `{ kind, target_id, title, channel_name }` items.
+- `propose_import({ kind, target_id, title?, channel_name?, source_kind })` —
+  stages a row on the Proposed rail. Drops silently if the target is
+  already in the corpus, already proposed, or in the rejection list.
+
+Approval is always a user click on the `/inbox` Proposed rail. Approve
+fetches full metadata via the Data API and reuses the existing
+`importVideos` path (provenance kind `like`); Dismiss appends to
+`discovery_rejections` and removes the candidate row.
+
+### Setup (`YOUTUBE_API_KEY`)
+
+Distinct from the OAuth client used by library import. The Data API
+endpoints (`search.list`, `videos.list`, `channels.list`) accept a server
+API key and bypass user OAuth entirely.
+
+1. Google Cloud Console → reuse the existing project (or create one).
+2. **APIs & Services → Library** → enable **YouTube Data API v3**.
+3. **APIs & Services → Credentials → Create credentials → API key**.
+4. **Restrict key → API restrictions** → select **YouTube Data API v3**
+   only. (Optional: also add an HTTP referrer or IP restriction if you
+   ever expose this beyond localhost.)
+5. Paste the key into `.env.local` as `YOUTUBE_API_KEY=...`.
+6. Restart `just dev`. `GET /api/agent/status` should now return
+   `{ youtubeSearchEnabled: true, ... }` and the chat composer should
+   no longer show the "Active YouTube search is disabled" hint.
+
+Free quota is 10,000 units/day. `search.list` costs 100 units → ~100
+searches/day. `videos.list` and `channels.list` (used during approve)
+cost 1 unit each, so the practical ceiling is set by `search.list`.
+
+### Graceful degrade when the key is unset
+
+- Description-graph (phase 5) is local-only and unaffected.
+- The substrate continues to populate via nightly.
+- Approve/dismiss of existing candidates works for `kind='channel'` only
+  in the trivially-resolvable case (full `UCxxx`) — but typically also
+  needs the API for the channels.list resolution; expect an HTTP 412 on
+  approve when the key is missing.
+- The agent's `search_youtube` returns a `youtube_api_key_missing` tool
+  result and relays a human-readable message back to the user. No
+  outbound call is made.
+
+### Inspecting and clearing rejections
+
+`/settings/discovery` is the canonical UI: lists every row with
+`target_id`, `kind`, `dismissed_at` (relative), per-row **Clear**, and a
+top-level **Clear all**. Equivalent SQL:
+
+```bash
+sqlite3 events.db "SELECT * FROM discovery_rejections ORDER BY dismissed_at DESC"
+sqlite3 events.db "DELETE FROM discovery_rejections WHERE target_id = '<id>'"
+sqlite3 events.db "DELETE FROM discovery_rejections"
+```
+
+### Anti-auto-search contract
+
+The agent's system prompt instructs the model to call `search_youtube`
+only when the user explicitly asks to find new content. There is no
+runtime guard — the only backstop is `AGENT_MAX_TURNS` (default 10) and
+the Data API's own quota response (HTTP 403). If the model strays in
+practice, tighten the prompt; quota exhaustion would be the loudest
+signal.
 
 ## Troubleshooting
 - **"Port 6060 in use"** — `just down`, or `lsof -i :6060` to see what's

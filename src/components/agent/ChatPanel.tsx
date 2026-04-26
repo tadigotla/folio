@@ -15,6 +15,7 @@ interface Props {
 interface StatusResponse {
   apiKeyPresent: boolean;
   model: string;
+  youtubeSearchEnabled: boolean;
 }
 
 interface ConversationResponse {
@@ -313,6 +314,21 @@ export function ChatPanel({ scopeDate }: Props) {
         onSubmit={onSubmit}
         disabled={phase === 'streaming'}
       />
+      {status &&
+        status.apiKeyPresent &&
+        !status.youtubeSearchEnabled && (
+          <div className="border-t border-rule px-4 py-2 font-sans text-[11px] italic text-ink-soft">
+            Active YouTube search is disabled. Set{' '}
+            <a
+              href="/settings/discovery"
+              title="See RUNBOOK → Discovery (active) for setup."
+              className="underline hover:text-ink"
+            >
+              <code className="not-italic">YOUTUBE_API_KEY</code>
+            </a>{' '}
+            to enable.
+          </div>
+        )}
     </aside>
   );
 }
